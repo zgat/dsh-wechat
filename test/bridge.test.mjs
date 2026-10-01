@@ -1,0 +1,2282 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import { InteractionRouter, parseApprovalReply, parseQuestionsReply } from '../lib/approval.js'
+import { WechatBridge, conversationKeyOf, userIdOf } from '../lib/bridge.js'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { createLogger } from '../lib/log.js'
+import { createFakeClient, createFakeHarness, createTempStore, inboundMessage, waitFor } from './helpers.mjs'
+
+const logger = createLogger('silent')
+
+/** Wire a bridge over the fakes. */
+async function setup(options = {}) {
+  const temp = await createTempStore({ accessPolicy: 'open', typing: false, ...(options.config ?? {}) })
+  const harness = createFakeHarness(options.harness)
+  const client = createFakeClient()
+  const interactions = new InteractionRouter({
+    config: temp.config,
+    logger,
+    send: (key, text) => bridge.deliver(key, text),
+    conversationOf: (sessionId) => bridge.conversationForSession(sessionId),
+  })
+  const bridge = new WechatBridge({
+    ctx: harness.ctx,
+    config: temp.config,
+    store: temp.store,
+    client,
+    interactions,
+    logger,
+  })
+  // The plugin entry registers these two listeners; the test wires them by hand
+  // so the bridge can be driven without booting a whole profile.
+  harness.ctx.on('agent/assistant-stream', (payload) => bridge.onAgentStream(payload))
+  harness.ctx.on('session/event', (session, event) => bridge.onSessionEvent(session, event))
+  // Most cases are about turn mechanics rather than onboarding, so the greeting
+  // counts as already delivered unless the case asks for it.
+  if (!options.welcome) temp.store.state.welcomed = { 'p2p:user@im.wechat': 'seeded-by-test' }
+  return {
+    bridge,
+    client,
+    harness,
+    interactions,
+    ...temp,
+    async cleanup() {
+      await bridge.disposeAll()
+      await temp.cleanup()
+    },
+  }
+}
+
+test('conversation keys and user ids round-trip', () => {
+  assert.equal(conversationKeyOf(inboundMessage({ userId: 'a@im.wechat' })), 'p2p:a@im.wechat')
+  assert.equal(conversationKeyOf(inboundMessage({ userId: 'a@im.wechat', groupId: 'g1' })), 'group:g1')
+  assert.equal(userIdOf('p2p:a@im.wechat'), 'a@im.wechat')
+  assert.equal(userIdOf('group:g1'), undefined)
+})
+
+test('an inbound message creates one session, runs a turn, and replies with the streamed text', async () => {
+  const env = await setup({ harness: { reply: '这是最终回答。' } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '帮我看看仓库' }))
+
+    await waitFor(() => env.client.sent.length > 0, { label: 'reply delivery' })
+    assert.equal(env.client.sent.length, 1)
+    assert.equal(env.client.sent[0].text, '这是最终回答。')
+    assert.equal(env.client.sent[0].toUserId, 'user@im.wechat')
+    assert.equal(env.client.sent[0].contextToken, 'ctx-token')
+
+    // The prompt reached the agent as a user-role message.
+    const agent = env.harness.agents[0]
+    assert.equal(agent.followups.length, 1)
+    assert.equal(agent.followups[0].role, 'user')
+    assert.deepEqual(agent.followups[0].content, [{ type: 'text', text: '帮我看看仓库' }])
+    assert.equal(Object.isFrozen(agent.followups[0]), true)
+
+    // And the session binding is durable.
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), agent.session.id)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a second message reuses the live session instead of creating another', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一条', id: 1 }))
+    await waitFor(() => env.client.sent.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '第二条', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+
+    assert.equal(env.harness.agents.length, 1)
+    assert.equal(env.harness.agents[0].followups.length, 2)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('duplicate deliveries are dropped', async () => {
+  const env = await setup()
+  try {
+    const message = inboundMessage({ text: '只处理一次', id: 777 })
+    await env.bridge.handleInbound(message)
+    await waitFor(() => env.client.sent.length === 1)
+    await env.bridge.handleInbound({ ...message })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(env.client.sent.length, 1)
+    assert.equal(env.harness.agents[0].followups.length, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('bot echoes and unaddressed messages are ignored', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound({ ...inboundMessage({ text: 'echo' }), message_type: 2 })
+    await env.bridge.handleInbound({ ...inboundMessage({ text: 'no sender' }), from_user_id: '' })
+    assert.equal(env.client.sent.length, 0)
+    assert.equal(env.harness.agents.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('allowlist rejects an unknown sender before any session exists', async () => {
+  const env = await setup({ config: { accessPolicy: 'allowlist', allowedUserIds: ['friend@im.wechat'] } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ userId: 'stranger@im.wechat', text: 'hi' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.match(env.client.sent[0].text, /白名单/)
+    assert.equal(env.harness.agents.length, 0)
+
+    await env.bridge.handleInbound(inboundMessage({ userId: 'friend@im.wechat', text: 'hi', id: 2 }))
+    await waitFor(() => env.harness.agents.length === 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a resumed session is preferred over a new one', async () => {
+  const env = await setup()
+  try {
+    await env.store.setSession('p2p:user@im.wechat', 'session-existing')
+    await env.bridge.handleInbound(inboundMessage({ text: '继续上次' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.equal(env.harness.agents.length, 1)
+    assert.equal(env.harness.agents[0].session.id, 'session-existing')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('long replies are chunked to the configured size', async () => {
+  const long = 'A'.repeat(4_100)
+  const env = await setup({ config: { chunkChars: 1_800 }, harness: { reply: long } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '写一篇长文' }))
+    await waitFor(() => env.client.sent.length >= 3, { label: 'three chunks' })
+    const chunks = env.client.sent.map((entry) => entry.text)
+    assert.equal(chunks.length, 3)
+    assert.equal(chunks.join(''), long)
+    for (const chunk of chunks) assert.ok(chunk.length <= 1_800)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an aborted turn reports the stop and keeps partial text', async () => {
+  const env = await setup({
+    harness: {
+      reply: '一半的回答',
+      reason: { kind: 'aborted', reason: { kind: 'user' } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.client.sent.length > 0)
+    assert.equal(env.client.sent[0].text, '一半的回答\n\n（已停止）')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a failed turn surfaces the error message', async () => {
+  const env = await setup({
+    harness: { reply: '', reason: { kind: 'error', error: { message: '模型调用失败', code: 'LLM' } } },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.client.sent.length > 0)
+    assert.match(env.client.sent[0].text, /回合失败：模型调用失败/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('tool calls produce progress lines when progress is on', async () => {
+  const env = await setup({
+    config: { progress: 'brief', showToolProgress: true },
+    harness: {
+      respond: ({ emit, agent }) => {
+        const session = agent.session
+        emit('session/event', session, { type: 'turn/start', data: { turn: 1 } })
+        emit('session/event', session, { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls -la"}' } })
+        emit('agent/assistant-stream', { agent, frame: { type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 1 } })
+        emit('agent/assistant-stream', { agent, frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 1, chunk: { type: 'text-delta', index: 0, text: '完成了。' } } })
+        emit('session/event', session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '看下目录' }))
+    await waitFor(() => env.client.sent.length >= 2, { label: 'progress + answer' })
+    assert.match(env.client.sent[0].text, /^🔧 bash /)
+    assert.match(env.client.sent[0].text, /ls -la/)
+    assert.equal(env.client.sent[1].text, '完成了。')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('slash commands answer without touching the agent', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/help' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.match(env.client.sent[0].text, /\/new/)
+    assert.equal(env.harness.agents.length, 0)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/ping', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /pong/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/不存在的指令', id: 3 }))
+    await waitFor(() => env.client.sent.length === 3)
+    assert.match(env.client.sent[2].text, /未知指令/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/new disposes the live agent and clears the binding', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const sessionId = env.harness.agents[0].session.id
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/new', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /已结束上一个会话/)
+    assert.deepEqual(env.harness.disposed, [sessionId])
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), undefined)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '新会话', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.notEqual(env.harness.agents[0].session.id, sessionId)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/stop cancels the running turn', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '/stop', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /已请求停止/.test(entry.text)))
+    assert.deepEqual(env.harness.agents[0].cancels, [{ kind: 'user' }])
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/model persists per conversation and shows in the summary', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace /tmp', id: 1 }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.match(env.client.sent[0].text, /已切换到项目目录：\/tmp/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/model deepseek-account/deepseek-flash', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /deepseek-account\/deepseek-flash/)
+
+    const info = await env.bridge.describeConversation('p2p:user@im.wechat')
+    assert.equal(info.model, 'deepseek-account/deepseek-flash')
+    assert.equal(info.workspace, '/tmp')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('typing state starts, refreshes and stops around a turn', async () => {
+  const env = await setup({ config: { typing: true, typingKeepaliveSeconds: 2 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '在吗' }))
+    await waitFor(() => env.client.sent.length === 1)
+    await waitFor(() => env.client.typing.some((entry) => entry.status === 2), { label: 'typing stop' })
+    assert.ok(env.client.typing.some((entry) => entry.status === 1))
+    assert.equal(env.client.typing[0].ilinkUserId, 'user@im.wechat')
+    assert.equal(env.client.typing[0].typingTicket, 'ticket-1')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('inbound media is decrypted into the state directory and referenced in the prompt', async () => {
+  const env = await setup({ config: { media: { enabled: true } } })
+  try {
+    const { encryptAesEcb } = await import('../lib/ilink/crypto.js')
+    const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex')
+    const ciphertext = encryptAesEcb(Buffer.from('假装这是图片字节', 'utf8'), key)
+    env.client.downloadCdn = async () => ciphertext
+
+    await env.bridge.handleInbound(
+      inboundMessage({
+        text: '看这张图',
+        items: [
+          { type: 1, text_item: { text: '看这张图' } },
+          {
+            type: 2,
+            image_item: { media: { encrypt_query_param: 'param', aes_key: Buffer.from(key).toString('base64'), encrypt_type: 1 }, mid_size: ciphertext.length },
+          },
+        ],
+      }),
+    )
+    await waitFor(() => env.client.sent.length === 1)
+    const prompt = env.harness.agents[0].followups[0].content[0].text
+    assert.match(prompt, /看这张图/)
+    assert.match(prompt, /\[微信附件\]/)
+    assert.match(prompt, /图片「/)
+
+    const { readFile } = await import('node:fs/promises')
+    const filePath = /已保存到：(.+?)（/.exec(prompt)[1]
+    assert.equal(await readFile(filePath, 'utf8'), '假装这是图片字节')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a quote is carried into the prompt', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(
+      inboundMessage({
+        items: [
+          {
+            type: 1,
+            text_item: { text: '这句要改吗' },
+            ref_msg: { title: '引用了一条消息', message_item: { type: 1, text_item: { text: '原文内容' } } },
+          },
+        ],
+      }),
+    )
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.match(env.harness.agents[0].followups[0].content[0].text, /\[引用消息\] 原文内容/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an approval request is answered from the chat', async () => {
+  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '删掉临时文件' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+
+    let outcome
+    const pending = env.interactions
+      .handleApproval({ agent, toolName: 'bash', reason: 'rm -rf /tmp/x', signal: new AbortController().signal }, async () => 'delegated')
+      .then((value) => {
+        outcome = value
+      })
+
+    await waitFor(() => env.client.sent.some((entry) => /需要你确认/.test(entry.text)), { label: 'approval prompt' })
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), true)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '允许', id: 99 }))
+    await pending
+    assert.equal(outcome, 'allowed-once')
+    // The approval reply must not have started a new turn.
+    assert.equal(agent.followups.length, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an approval can be rejected, and unknown text keeps waiting', async () => {
+  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+
+    const pending = env.interactions.handleApproval({ agent, toolName: 'bash', signal: new AbortController().signal }, async () => 'delegated')
+    await waitFor(() => env.interactions.isWaiting('p2p:user@im.wechat'))
+
+    assert.equal(env.interactions.tryConsume('p2p:user@im.wechat', '这是什么'), false)
+    assert.equal(env.interactions.tryConsume('p2p:user@im.wechat', '拒绝'), true)
+    assert.equal(await pending, 'rejected')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an approval for an unknown session delegates to the next answerer', async () => {
+  const env = await setup()
+  try {
+    const result = await env.interactions.handleApproval(
+      { agent: { session: { id: 'session-unrelated' } }, toolName: 'bash', signal: new AbortController().signal },
+      async () => 'delegated',
+    )
+    assert.equal(result, 'delegated')
+    assert.equal(env.client.sent.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('questions render options and accept a numbered reply', async () => {
+  const env = await setup({ config: { questionsTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+
+    const pending = env.interactions.handleQuestions(
+      {
+        agent,
+        signal: new AbortController().signal,
+        questions: [
+          {
+            id: 'q1',
+            question: '用哪个模型？',
+            options: [
+              { label: 'deepseek-flash', description: '更快' },
+              { label: 'deepseek-pro', description: '更强' },
+            ],
+          },
+        ],
+      },
+      async () => 'delegated',
+    )
+
+    await waitFor(() => env.client.sent.some((entry) => /Agent 需要你的回答/.test(entry.text)))
+    assert.match(env.client.sent.at(-1).text, /1\) deepseek-flash — 更快/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '2', id: 42 }))
+    assert.deepEqual(await pending, { answers: [{ id: 'q1', selected: ['deepseek-pro'] }] })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('question replies without options are passed through as custom answers', () => {
+  const batch = parseQuestionsReply([{ id: 'q1', question: '项目叫什么？' }], '叫 dsh-wechat')
+  assert.deepEqual(batch, { answers: [{ id: 'q1', selected: [], custom: '叫 dsh-wechat' }] })
+})
+
+test('approval replies are recognized in both languages', () => {
+  assert.equal(parseApprovalReply('允许'), 'allow')
+  assert.equal(parseApprovalReply(' YES '), 'allow')
+  assert.equal(parseApprovalReply('/approve'), 'allow')
+  assert.equal(parseApprovalReply('拒绝'), 'reject')
+  assert.equal(parseApprovalReply('no'), 'reject')
+  assert.equal(parseApprovalReply('取消'), 'cancel')
+  assert.equal(parseApprovalReply('再想想'), null)
+})
+
+test('tools deliver through the same path as final answers', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+
+    const count = await env.bridge.deliver('p2p:user@im.wechat', '主动推送一条')
+    assert.equal(count, 1)
+    assert.equal(env.client.sent.at(-1).text, '主动推送一条')
+
+    await assert.rejects(() => env.bridge.deliver('group:g1', '群里发不了'), /cannot address conversation/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('outbound files are encrypted, uploaded and referenced', async () => {
+  const env = await setup()
+  const outside = await mkdtemp(join(tmpdir(), 'dsh-wechat-outbox-'))
+  try {
+    const { writeFile } = await import('node:fs/promises')
+    const filePath = join(outside, 'report.txt')
+    await writeFile(filePath, 'hello file')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const result = await env.bridge.deliverFile('p2p:user@im.wechat', filePath)
+    assert.equal(result.name, 'report.txt')
+    assert.equal(result.size, 10)
+
+    const upload = env.client.uploads.at(-1)
+    assert.equal(upload.rawSize, 10)
+    assert.equal(upload.mediaType, 3)
+    assert.equal(upload.encryptedSize, 16)
+    const item = env.client.sent.at(-1).item
+    assert.equal(item.type, 4)
+    assert.equal(item.file_item.file_name, 'report.txt')
+    assert.equal(item.file_item.len, '10')
+    assert.ok(item.file_item.media.encrypt_query_param)
+  } finally {
+    await rm(outside, { recursive: true, force: true })
+    await env.cleanup()
+  }
+})
+
+test('the state directory is never sent as a chat attachment', async () => {
+  const env = await setup()
+  try {
+    // The credential lives there; a prompt-injected agent must not post it.
+    await assert.rejects(
+      () => env.bridge.deliverFile('p2p:user@im.wechat', join(env.dir, 'credentials.json')),
+      /拒绝发送状态目录内的文件/,
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a reply token from a rejected sender is not cached', async () => {
+  const env = await setup({ config: { accessPolicy: 'allowlist', allowedUserIds: ['friend@im.wechat'] } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ userId: 'stranger@im.wechat', token: 'stranger-token' }))
+    await waitFor(() => env.client.sent.length === 1)
+    // The rejection is delivered, but the token is not usable afterwards.
+    assert.equal(env.store.contextTokenFor('stranger@im.wechat'), undefined)
+    assert.equal(env.bridge.maySendTo('p2p:stranger@im.wechat', 'p2p:friend@im.wechat'), false)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('disposeAll tears down live agents', async () => {
+  const env = await setup()
+  await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+  await waitFor(() => env.harness.agents.length === 1)
+  const sessionId = env.harness.agents[0].session.id
+  await env.bridge.disposeAll()
+  assert.deepEqual(env.harness.disposed, [sessionId])
+  await env.cleanup()
+})
+
+test('a created agent always carries a model route for prompt assembly', async () => {
+  // Without a route the shipped persona text ("powered by the {{model}} model")
+  // cannot render, so the deployment default must be adopted.
+  const env = await setup({
+    harness: {
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'max' }),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.deepEqual(env.harness.agents[0].options, {
+      provider: 'deepseek-account',
+      model: 'deepseek-flash',
+      reasoningEffort: 'max',
+    })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an explicit plugin model wins over the deployment default', async () => {
+  const env = await setup({
+    config: { model: { provider: 'deepseek-account', model: 'deepseek-pro' } },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'other', model: 'other-model' }) },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.deepEqual(env.harness.agents[0].options, { provider: 'deepseek-account', model: 'deepseek-pro' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a per-chat /model override wins over both', async () => {
+  const env = await setup({
+    config: { model: { provider: 'deepseek-account', model: 'deepseek-pro' } },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'other', model: 'other-model' }) },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/model deepseek-account/deepseek-flash', id: 1 }))
+    await waitFor(() => env.client.sent.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '开始', id: 2 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.deepEqual(env.harness.agents[0].options, { provider: 'deepseek-account', model: 'deepseek-flash' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a resumed session also keeps a model route', async () => {
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+    },
+  })
+  try {
+    await env.store.setSession('p2p:user@im.wechat', 'session-existing')
+    await env.bridge.handleInbound(inboundMessage({ text: '继续' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].session.id, 'session-existing')
+    assert.deepEqual(env.harness.agents[0].options, { provider: 'deepseek-account', model: 'deepseek-flash' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('the first message is answered with an onboarding guide', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: {
+        workspaceRegistry: {
+          // Real directories: the command validates that the path exists.
+          list: () => [
+            { path: '/Volumes/Seagate ZP1000/Dev', title: 'Dev' },
+            { path: '/tmp', title: 'scratch' },
+          ],
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.client.sent.length >= 2, { label: 'welcome + answer' })
+
+    const welcome = env.client.sent[0].text
+    assert.match(welcome, /微信机器人已就绪/)
+    assert.match(welcome, /\/workspace/)
+    assert.match(welcome, /\/model/)
+    assert.match(welcome, /\/reasoning/)
+    assert.match(welcome, /当前：工作区 \/Volumes\/Seagate ZP1000\/Dev/)
+    // The greeting goes out before the turn's answer.
+    assert.notEqual(env.client.sent[1].text, welcome)
+
+    // …and only once.
+    await env.bridge.handleInbound(inboundMessage({ text: '再来一次', id: 2 }))
+    await waitFor(() => env.client.sent.length >= 3)
+    assert.equal(env.client.sent.filter((entry) => /微信机器人已就绪/.test(entry.text)).length, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a command as first contact skips the greeting', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/ping' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.match(env.client.sent[0].text, /pong/)
+    assert.equal(env.client.sent.filter((entry) => /微信机器人已就绪/.test(entry.text)).length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/workspace lists project directories by name and selects by number', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      services: {
+        workspaceRegistry: {
+          // Real directories: the command validates that the path exists.
+          list: () => [
+            { path: '/Volumes/Seagate ZP1000/Dev', title: 'Dev' },
+            { path: '/tmp', title: 'scratch' },
+          ],
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const list = env.client.sent.map((entry) => entry.text).find((text) => /项目目录/.test(text))
+    // The friendly name comes first: that is the "project" the user recognises.
+    assert.match(list, /1\. Dev（\/Volumes\/Seagate ZP1000\/Dev）/)
+    assert.match(list, /2\. scratch（\/tmp）/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace 2', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    const switched = env.client.sent.map((entry) => entry.text).find((text) => /已切换到项目目录/.test(text))
+    assert.match(switched, /\/tmp/)
+    assert.equal(env.store.state.workspaces['p2p:user@im.wechat'], '/tmp')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/workspace accepts a project name, and switching ends the old session', async () => {
+  const env = await setup({
+    harness: {
+      reply: 'ok',
+      services: {
+        workspaceRegistry: {
+          list: () => [
+            { path: '/Volumes/Seagate ZP1000/Dev', title: 'Dev' },
+            { path: '/tmp', title: 'scratch' },
+          ],
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const previous = env.harness.agents[0].session.id
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace scratch', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /已切换到项目目录/.test(entry.text)))
+    const reply = env.client.sent.map((entry) => entry.text).find((text) => /已切换到项目目录/.test(text))
+    assert.match(reply, new RegExp(previous))
+    // The old agent is gone and the binding is clear, so the next message starts fresh.
+    assert.deepEqual(env.harness.disposed, [previous])
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), undefined)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '新项目', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.notEqual(env.harness.agents[0].session.id, previous)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/workspace add registers a new project directory', async () => {
+  const created = []
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: {
+          list: () => created.map((entry) => ({ path: entry.path, title: entry.title })),
+          create: async (path, title) => {
+            created.push({ path, title })
+            return { path, title }
+          },
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace add /tmp myproj' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.deepEqual(created, [{ path: '/tmp', title: 'myproj' }])
+    assert.match(env.client.sent[0].text, /已登记并切换到项目目录：\/tmp/)
+    assert.equal(env.store.state.workspaces['p2p:user@im.wechat'], '/tmp')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an unusable project directory produces an explanation, not silence', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace /definitely/not/here' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.match(env.client.sent[0].text, /工作区路径不存在或不是目录/)
+    assert.equal(env.store.state.workspaces?.['p2p:user@im.wechat'], undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/model lists the llm catalog and selects by number', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: {
+        llm: {
+          listProviders: async () => [{ id: 'deepseek-account' }],
+          listModels: async () => [{ id: 'deepseek-flash', name: 'Flash' }, { id: 'deepseek-pro', name: 'Pro' }],
+          resolveModel: async () => ({ reasoning: { efforts: [{ id: 'high', name: '高' }], defaultEffort: 'high' } }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/model' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const list = env.client.sent[0].text
+    assert.match(list, /1\. deepseek-account\/deepseek-flash（Flash） ←当前/)
+    assert.match(list, /2\. deepseek-account\/deepseek-pro（Pro）/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/model 2', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /deepseek-account\/deepseek-pro/)
+
+    // The selection reaches the next agent that is created.
+    await env.bridge.handleInbound(inboundMessage({ text: '开始', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].options.model, 'deepseek-pro')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/reasoning lists the model efforts and applies the selection', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'max' }),
+      },
+      services: {
+        llm: {
+          listProviders: async () => [{ id: 'deepseek-account' }],
+          listModels: async () => [],
+          resolveModel: async () => ({
+            reasoning: {
+              efforts: [
+                { id: 'low', name: '低' },
+                { id: 'high', name: '高' },
+                { id: 'max', name: '最高' },
+              ],
+              defaultEffort: 'high',
+            },
+          }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/reasoning' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const list = env.client.sent[0].text
+    assert.match(list, /1\. low（低）/)
+    assert.match(list, /3\. max（最高） ←当前/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/reasoning 1', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /已记录本会话思考深度：low/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '开始', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].options.reasoningEffort, 'low')
+    assert.equal(env.harness.agents[0].options.model, 'deepseek-flash')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/settings summarizes the per-conversation configuration', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { list: () => [{ path: '/tmp/ws' }] } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/设置' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const text = env.client.sent[0].text
+    assert.match(text, /当前会话设置/)
+    assert.match(text, /工作区：\/tmp\/ws/)
+    assert.match(text, /模型：deepseek-account\/deepseek-flash/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/help documents every list command and its short form', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/帮助' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const text = env.client.sent[0].text
+    for (const command of ['/workspace', '/model', '/reasoning', '/settings', '/new', '/stop']) {
+      assert.ok(text.includes(command), `/help must mention ${command}`)
+    }
+    assert.match(text, /\/workspace 2/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a session archived in the GUI is replaced instead of blocking forever', async () => {
+  const archived = ['session-mine']
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { archivedSessionIds: archived, list: () => [] } },
+    },
+  })
+  try {
+    await env.store.setSession('p2p:user@im.wechat', 'session-mine')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1, { label: 'fresh session created' })
+
+    // The archived binding is dropped, a new session takes over, and the user is told.
+    assert.equal(env.harness.agents[0].session.id !== 'session-mine', true)
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), env.harness.agents[0].session.id)
+    assert.ok(env.client.sent.some((entry) => /已在 DSH 里被归档/.test(entry.text)))
+    // The prompt still runs in the new session.
+    assert.equal(env.harness.agents[0].followups.length, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a blocked turn reports the archive and frees the binding', async () => {
+  const archived = []
+  const env = await setup({
+    harness: {
+      // The archive lands while the turn is running: that is the race the
+      // blocked notice exists for, so the stub archives before closing the turn.
+      respond: ({ emit, agent }) => {
+        archived.push(agent.session.id)
+        emit('session/event', agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'blocked' } } })
+      },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { archivedSessionIds: archived, list: () => [] } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.client.sent.length > 0, { label: 'blocked notice' })
+    const notice = env.client.sent.map((entry) => entry.text).find((text) => /回合被拦截/.test(text))
+    assert.ok(notice, 'the user must be told why nothing happened')
+    assert.match(notice, /被归档/)
+    await waitFor(() => env.store.sessionFor('p2p:user@im.wechat') === undefined, { label: 'binding released' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a blocked turn without archiving points at /new', async () => {
+  const env = await setup({
+    harness: {
+      reason: { kind: 'blocked' },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { archivedSessionIds: [], list: () => [] } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.client.sent.length > 0)
+    const notice = env.client.sent.map((entry) => entry.text).find((text) => /回合被拦截/.test(text))
+    assert.match(notice, /pre-step/)
+    assert.match(notice, /\/new/)
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat') !== undefined, true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a timed-out turn keeps its place so the next answer is not misattributed', async () => {
+  const env = await setup({
+    config: { turnTimeoutSeconds: 5 },
+    harness: {
+      // Defer every turn: the test decides when each one ends.
+      respond: ({ defer }) => defer(),
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一个问题', id: 1 }))
+    await waitFor(() => env.harness.agents.length === 1, { label: 'first turn starts' })
+    await env.bridge.handleInbound(inboundMessage({ text: '第二个问题', id: 2 }))
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 2, {
+      label: 'both turns queued',
+    })
+
+    // The first turn times out: the user is told, and the placeholder must stay
+    // in the queue so the agent's turns and the pending records stay aligned.
+    await waitFor(() => env.client.sent.some((entry) => /超过 5 秒/.test(entry.text)), {
+      timeoutMs: 9_000,
+      label: 'timeout notice',
+    })
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 2)
+    // The queued message keeps a fresh budget: its turn has not started yet, so
+    // the first turn's timeout must not time it out as well.
+    assert.equal(env.client.sent.filter((entry) => /超过 5 秒/.test(entry.text)).length, 1)
+
+    // Finishing the timed-out turn must not deliver its text…
+    env.harness.agents[0].completeDeferredTurn('第一个问题的答案')
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 1, {
+      label: 'placeholder consumed',
+    })
+    assert.equal(env.client.sent.some((entry) => /第一个问题的答案/.test(entry.text)), false)
+
+    // …and the second turn's own answer still reaches the user.
+    env.harness.agents[0].completeDeferredTurn('第二个问题的答案')
+    await waitFor(() => env.client.sent.some((entry) => /第二个问题的答案/.test(entry.text)), {
+      label: 'second answer delivered',
+    })
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/stop also discards the queued turns and says how many', async () => {
+  const env = await setup({ harness: { respond: ({ defer }) => defer() } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一个', id: 1 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '第二个', id: 2 }))
+    await env.bridge.handleInbound(inboundMessage({ text: '第三个', id: 3 }))
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 3, {
+      label: 'three turns queued',
+    })
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/stop', id: 4 }))
+    await waitFor(() => env.client.sent.some((entry) => /已请求停止当前回合/.test(entry.text)), { label: 'stop reply' })
+    const reply = env.client.sent.map((entry) => entry.text).find((text) => /已请求停止当前回合/.test(text))
+    assert.match(reply, /丢弃了排队中的 2 条消息/)
+    assert.deepEqual(env.harness.agents[0].cancels, [{ kind: 'user' }])
+    // The running turn keeps its placeholder; the discarded ones are gone.
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/new drops queued turns without leaving typing timers behind', async () => {
+  const env = await setup({ config: { typing: true }, harness: { respond: ({ defer }) => defer() } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一个', id: 1 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '第二个', id: 2 }))
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 2)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/new', id: 3 }))
+    await waitFor(() => env.client.sent.some((entry) => /已结束上一个会话/.test(entry.text)))
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 0)
+
+    // Every typing indicator that started is eventually cancelled.
+    await waitFor(() => env.client.typing.some((entry) => entry.status === 2), { label: 'typing stopped' })
+    const started = env.client.typing.filter((entry) => entry.status === 1).length
+    const stopped = env.client.typing.filter((entry) => entry.status === 2).length
+    assert.ok(stopped >= 1 && started >= 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('group messages and empty message bodies are ignored', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '群里的消息', groupId: 'g1' }))
+    await env.bridge.handleInbound(inboundMessage({ text: '没有内容', items: [] }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(env.harness.agents.length, 0)
+    assert.equal(env.client.sent.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a transient send failure is retried once', async () => {
+  const env = await setup()
+  try {
+    const original = env.client.sendText.bind(env.client)
+    let attempts = 0
+    env.client.sendText = async (payload) => {
+      attempts += 1
+      if (attempts === 1) throw new Error('socket hang up')
+      return original(payload)
+    }
+    const count = await env.bridge.deliver('p2p:user@im.wechat', '重试也要发出去')
+    assert.equal(count, 1)
+    assert.equal(attempts, 2)
+    assert.equal(env.client.sent.at(-1).text, '重试也要发出去')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a persistent send failure is contained, recorded and reported', async () => {
+  const env = await setup()
+  try {
+    env.client.sendText = async () => {
+      throw new Error('network down')
+    }
+    // Delivery no longer throws: one lost chunk must not abort the rest of an
+    // answer. The failure is surfaced through /status and a best-effort notice.
+    const sent = await env.bridge.deliver('p2p:user@im.wechat', '发不出去')
+    assert.equal(sent, 0)
+    assert.match(env.store.state.stats.lastError.message, /network down/)
+    const info = await env.bridge.describeConversation('p2p:user@im.wechat')
+    assert.match(info.stats.lastError.message, /回复发送失败/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a later chunk is still attempted after an earlier one fails', async () => {
+  const env = await setup()
+  try {
+    const original = env.client.sendText.bind(env.client)
+    let call = 0
+    env.client.sendText = async (payload) => {
+      call += 1
+      if (call === 1) throw new Error('first chunk lost')
+      return original(payload)
+    }
+    const sent = await env.bridge.deliver('p2p:user@im.wechat', '第一段\n\n第二段', { })
+    void sent
+    const texts = env.client.sent.map((entry) => entry.text)
+    assert.ok(texts.some((text) => /第二段/.test(text)), 'the tail of the answer must still be sent')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('idle agents are released, and the conversation resumes on the next message', async () => {
+  const env = await setup({ config: { idleDisposeMinutes: 0.03, typing: false }, harness: { reply: '回答' } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一句' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const sessionId = env.harness.agents[0].session.id
+
+    // Too early: the conversation is not idle yet.
+    assert.equal(await env.bridge.disposeIdleAgents(), 0)
+
+    // After the quiet period the background sweep releases the agent on its own.
+    await waitFor(() => env.harness.disposed.length === 1, { timeoutMs: 8_000, label: 'idle release' })
+    assert.deepEqual(env.harness.disposed, [sessionId])
+    assert.equal(env.harness.agents.length, 0)
+    // A second sweep has nothing left to do.
+    assert.equal(await env.bridge.disposeIdleAgents(), 0)
+    // The binding survives, so the next message resumes the same session.
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), sessionId)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '第二句', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.equal(env.harness.agents.length, 1)
+    assert.equal(env.harness.agents[0].session.id, sessionId)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a session with a turn in flight is never treated as idle', async () => {
+  const env = await setup({ config: { idleDisposeMinutes: 0.01 }, harness: { respond: ({ defer }) => defer() } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '慢慢跑' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    // The turn never ended, so the agent must stay alive.
+    assert.equal(await env.bridge.disposeIdleAgents(), 0)
+    assert.equal(env.harness.disposed.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+/** A sessionQuery corpus shaped like the one the GUI lists from. */
+function fakeSessionQuery(records) {
+  // `sessionQuery` hands back *title snapshots*, not strings — a fixture that used
+  // bare strings let `[object Object]` reach the chat, so the shape is mirrored here.
+  const snapshot = (title) => ({ title, messageSeqs: [1], source: { kind: 'provider' }, eventSeq: 7, updatedAt: 1 })
+  return {
+    listSessions: async () => records,
+    readTitleSnapshots: async (ids) =>
+      ids.map((id) => {
+        const found = records.find((record) => record.header.id === id)
+        return found?.title
+          ? { status: 'fulfilled', value: { session: { id }, title: snapshot(found.title) } }
+          : { status: 'rejected', reason: new Error('no title') }
+      }),
+    readTitle: async (id) => {
+      const found = records.find((record) => record.header.id === id)
+      return found?.title ? snapshot(found.title) : undefined
+    },
+  }
+}
+
+test('/session lists titles, then asks how many segments to echo back', async () => {
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp', title: 'scratch' }] },
+        sessionQuery: fakeSessionQuery([
+          { header: { id: 'session-alpha', cwd: '/tmp', createdAt: 3_000 }, title: '整理测试' },
+          { header: { id: 'session-beta', cwd: '/tmp', createdAt: 2_000 }, title: '重构桥接' },
+          { header: { id: 'session-other', cwd: '/elsewhere', createdAt: 9_000 }, title: '别的项目' },
+        ]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '当前对话' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const created = env.harness.agents[0].session.id
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/session', id: 2 }))
+    await waitFor(() => env.client.sent.length >= 2)
+    const list = env.client.sent.map((entry) => entry.text).find((text) => /下的对话/.test(text))
+    assert.match(list, /1\..*←当前/)
+    assert.match(list, /2\. 整理测试/)
+    assert.match(list, /3\. 重构桥接/)
+    assert.ok(!list.includes('别的项目'))
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/session 2', id: 3 }))
+    await waitFor(() => env.client.sent.some((entry) => /已切换到对话/.test(entry.text)))
+    const selected = env.client.sent.map((entry) => entry.text).find((text) => /已切换到对话/.test(text))
+    // The conversation is bound right away — it is still that conversation.
+    assert.match(selected, /已切换到对话：整理测试/)
+    assert.ok(!/已切换到对话：session-alpha/.test(selected), 'the label must be the title, not the id')
+    assert.match(selected, /0-99/)
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-alpha')
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat')?.sessionId, 'session-alpha')
+    // The old agent is released so the next message opens the new conversation.
+    assert.deepEqual(env.harness.disposed, [created])
+
+    // The next message resumes that very session (history intact).
+    await env.bridge.handleInbound(inboundMessage({ text: '继续之前的话题', id: 4 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].session.id, 'session-alpha')
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat'), null, 'a plain message closes the question')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('answering 0 only acknowledges: the conversation is untouched', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: fakeSessionQuery([{ header: { id: 'session-alpha', cwd: '/tmp', createdAt: 3_000 }, title: '整理测试' }]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-alpha' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    const before = env.client.sent.length
+    await env.bridge.handleInbound(inboundMessage({ text: '0', id: 2 }))
+    await waitFor(() => env.client.sent.length > before)
+    const reply = env.client.sent.at(-1).text
+    assert.match(reply, /不发回执/)
+    assert.equal(env.client.sent.length, before + 1, '0 must not produce a recap')
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-alpha', 'the binding is unchanged')
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat'), null)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('answering N echoes the last N exchanges back to WeChat', async () => {
+  const events = []
+  for (let index = 1; index <= 4; index += 1) {
+    events.push({ type: 'user/message', data: { message: { content: `旧问题${index}` } } })
+    events.push({ type: 'assistant/message', data: { message: { content: `旧回答${index}` } } })
+  }
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-history', cwd: '/tmp', createdAt: 1 } }],
+          readTitleSnapshots: async () => [{ status: 'fulfilled', value: { title: { title: '重构桥接' } } }],
+          readTitle: async () => ({ title: '重构桥接' }),
+          readSession: async () => ({ events }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-history' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    const before = env.client.sent.length
+    await env.bridge.handleInbound(inboundMessage({ text: '2', id: 2 }))
+    await waitFor(() => env.client.sent.length >= before + 2)
+    const recap = env.client.sent.find((entry) => /段回执/.test(entry.text))
+    assert.ok(recap, 'the recap must be delivered to the chat')
+    assert.match(recap.text, /重构桥接/)
+    assert.match(recap.text, /用户：旧问题3/)
+    assert.match(recap.text, /助手：旧回答3/)
+    assert.match(recap.text, /用户：旧问题4/)
+    assert.ok(!recap.text.includes('旧问题1'), 'older exchanges stay out')
+    // The session is still the target one, and no background is injected into the model.
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-history')
+    await env.bridge.handleInbound(inboundMessage({ text: '接着刚才说', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].session.id, 'session-history')
+    assert.match(env.harness.agents[0].prompts[0], /^接着刚才说$/, 'the model sees only the user message')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a message without a number answers "no recap"', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: fakeSessionQuery([{ header: { id: 'session-target', cwd: '/tmp', createdAt: 1 }, title: '目标对话' }]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-target' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    await env.bridge.handleInbound(inboundMessage({ text: '直接开干', id: 2 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat'), null, 'the question is cleared by the message')
+    assert.equal(env.harness.agents[0].session.id, 'session-target', 'the message continues the selected conversation')
+    assert.match(env.harness.agents[0].prompts[0], /^直接开干$/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/session refuses a conversation that was archived in the GUI', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }], archivedSessionIds: ['session-archived'] },
+        sessionQuery: fakeSessionQuery([{ header: { id: 'session-archived', cwd: '/tmp', createdAt: 1 } }]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-archived' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.match(env.client.sent[0].text, /被归档/)
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat'), null)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/session new clears a pending switch', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: fakeSessionQuery([{ header: { id: 'session-old', cwd: '/tmp', createdAt: 1 }, title: '旧对话' }]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-old' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    await env.bridge.handleInbound(inboundMessage({ text: '/session new', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /开启新对话|没有进行中的对话/.test(entry.text)))
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat'), null)
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/model lists the llm catalog and selects by number', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: {
+        llm: {
+          listProviders: async () => [{ id: 'deepseek-account' }],
+          listModels: async () => [{ id: 'deepseek-flash', name: 'Flash' }, { id: 'deepseek-pro', name: 'Pro' }],
+          resolveModel: async () => ({ reasoning: { efforts: [{ id: 'high', name: '高' }], defaultEffort: 'high' } }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/model' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const list = env.client.sent[0].text
+    assert.match(list, /1\. deepseek-account\/deepseek-flash（Flash） ←当前/)
+    assert.match(list, /2\. deepseek-account\/deepseek-pro（Pro）/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/model 2', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /deepseek-account\/deepseek-pro/)
+
+    // The selection reaches the next agent that is created.
+    await env.bridge.handleInbound(inboundMessage({ text: '开始', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].options.model, 'deepseek-pro')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/reasoning lists the model efforts and applies the selection', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'max' }),
+      },
+      services: {
+        llm: {
+          listProviders: async () => [{ id: 'deepseek-account' }],
+          listModels: async () => [],
+          resolveModel: async () => ({
+            reasoning: {
+              efforts: [
+                { id: 'low', name: '低' },
+                { id: 'high', name: '高' },
+                { id: 'max', name: '最高' },
+              ],
+              defaultEffort: 'high',
+            },
+          }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/reasoning' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const list = env.client.sent[0].text
+    assert.match(list, /1\. low（低）/)
+    assert.match(list, /3\. max（最高） ←当前/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/reasoning 1', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /已记录本会话思考深度：low/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '开始', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].options.reasoningEffort, 'low')
+    assert.equal(env.harness.agents[0].options.model, 'deepseek-flash')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/settings summarizes the per-conversation configuration', async () => {
+  const env = await setup({
+    welcome: true,
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { list: () => [{ path: '/tmp/ws' }] } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/设置' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const text = env.client.sent[0].text
+    assert.match(text, /当前会话设置/)
+    assert.match(text, /工作区：\/tmp\/ws/)
+    assert.match(text, /模型：deepseek-account\/deepseek-flash/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/help documents every list command and its short form', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/帮助' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const text = env.client.sent[0].text
+    for (const command of ['/workspace', '/model', '/reasoning', '/settings', '/new', '/stop']) {
+      assert.ok(text.includes(command), `/help must mention ${command}`)
+    }
+    assert.match(text, /\/workspace 2/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a session archived in the GUI is replaced instead of blocking forever', async () => {
+  const archived = ['session-mine']
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { archivedSessionIds: archived, list: () => [] } },
+    },
+  })
+  try {
+    await env.store.setSession('p2p:user@im.wechat', 'session-mine')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1, { label: 'fresh session created' })
+
+    // The archived binding is dropped, a new session takes over, and the user is told.
+    assert.equal(env.harness.agents[0].session.id !== 'session-mine', true)
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), env.harness.agents[0].session.id)
+    assert.ok(env.client.sent.some((entry) => /已在 DSH 里被归档/.test(entry.text)))
+    // The prompt still runs in the new session.
+    assert.equal(env.harness.agents[0].followups.length, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a blocked turn reports the archive and frees the binding', async () => {
+  const archived = []
+  const env = await setup({
+    harness: {
+      // The archive lands while the turn is running: that is the race the
+      // blocked notice exists for, so the stub archives before closing the turn.
+      respond: ({ emit, agent }) => {
+        archived.push(agent.session.id)
+        emit('session/event', agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'blocked' } } })
+      },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { archivedSessionIds: archived, list: () => [] } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.client.sent.length > 0, { label: 'blocked notice' })
+    const notice = env.client.sent.map((entry) => entry.text).find((text) => /回合被拦截/.test(text))
+    assert.ok(notice, 'the user must be told why nothing happened')
+    assert.match(notice, /被归档/)
+    await waitFor(() => env.store.sessionFor('p2p:user@im.wechat') === undefined, { label: 'binding released' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a blocked turn without archiving points at /new', async () => {
+  const env = await setup({
+    harness: {
+      reason: { kind: 'blocked' },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { workspaceRegistry: { archivedSessionIds: [], list: () => [] } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.client.sent.length > 0)
+    const notice = env.client.sent.map((entry) => entry.text).find((text) => /回合被拦截/.test(text))
+    assert.match(notice, /pre-step/)
+    assert.match(notice, /\/new/)
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat') !== undefined, true)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a timed-out turn keeps its place so the next answer is not misattributed', async () => {
+  const env = await setup({
+    config: { turnTimeoutSeconds: 5 },
+    harness: {
+      // Defer every turn: the test decides when each one ends.
+      respond: ({ defer }) => defer(),
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一个问题', id: 1 }))
+    await waitFor(() => env.harness.agents.length === 1, { label: 'first turn starts' })
+    await env.bridge.handleInbound(inboundMessage({ text: '第二个问题', id: 2 }))
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 2, {
+      label: 'both turns queued',
+    })
+
+    // The first turn times out: the user is told, and the placeholder must stay
+    // in the queue so the agent's turns and the pending records stay aligned.
+    await waitFor(() => env.client.sent.some((entry) => /超过 5 秒/.test(entry.text)), {
+      timeoutMs: 9_000,
+      label: 'timeout notice',
+    })
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 2)
+    // The queued message keeps a fresh budget: its turn has not started yet, so
+    // the first turn's timeout must not time it out as well.
+    assert.equal(env.client.sent.filter((entry) => /超过 5 秒/.test(entry.text)).length, 1)
+
+    // Finishing the timed-out turn must not deliver its text…
+    env.harness.agents[0].completeDeferredTurn('第一个问题的答案')
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 1, {
+      label: 'placeholder consumed',
+    })
+    assert.equal(env.client.sent.some((entry) => /第一个问题的答案/.test(entry.text)), false)
+
+    // …and the second turn's own answer still reaches the user.
+    env.harness.agents[0].completeDeferredTurn('第二个问题的答案')
+    await waitFor(() => env.client.sent.some((entry) => /第二个问题的答案/.test(entry.text)), {
+      label: 'second answer delivered',
+    })
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/stop also discards the queued turns and says how many', async () => {
+  const env = await setup({ harness: { respond: ({ defer }) => defer() } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一个', id: 1 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '第二个', id: 2 }))
+    await env.bridge.handleInbound(inboundMessage({ text: '第三个', id: 3 }))
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 3, {
+      label: 'three turns queued',
+    })
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/stop', id: 4 }))
+    await waitFor(() => env.client.sent.some((entry) => /已请求停止当前回合/.test(entry.text)), { label: 'stop reply' })
+    const reply = env.client.sent.map((entry) => entry.text).find((text) => /已请求停止当前回合/.test(text))
+    assert.match(reply, /丢弃了排队中的 2 条消息/)
+    assert.deepEqual(env.harness.agents[0].cancels, [{ kind: 'user' }])
+    // The running turn keeps its placeholder; the discarded ones are gone.
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/new drops queued turns without leaving typing timers behind', async () => {
+  const env = await setup({ config: { typing: true }, harness: { respond: ({ defer }) => defer() } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一个', id: 1 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '第二个', id: 2 }))
+    await waitFor(async () => (await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns === 2)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/new', id: 3 }))
+    await waitFor(() => env.client.sent.some((entry) => /已结束上一个会话/.test(entry.text)))
+    assert.equal((await env.bridge.describeConversation('p2p:user@im.wechat')).runningTurns, 0)
+
+    // Every typing indicator that started is eventually cancelled.
+    await waitFor(() => env.client.typing.some((entry) => entry.status === 2), { label: 'typing stopped' })
+    const started = env.client.typing.filter((entry) => entry.status === 1).length
+    const stopped = env.client.typing.filter((entry) => entry.status === 2).length
+    assert.ok(stopped >= 1 && started >= 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('group messages and empty message bodies are ignored', async () => {
+  const env = await setup()
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '群里的消息', groupId: 'g1' }))
+    await env.bridge.handleInbound(inboundMessage({ text: '没有内容', items: [] }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(env.harness.agents.length, 0)
+    assert.equal(env.client.sent.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a transient send failure is retried once', async () => {
+  const env = await setup()
+  try {
+    const original = env.client.sendText.bind(env.client)
+    let attempts = 0
+    env.client.sendText = async (payload) => {
+      attempts += 1
+      if (attempts === 1) throw new Error('socket hang up')
+      return original(payload)
+    }
+    const count = await env.bridge.deliver('p2p:user@im.wechat', '重试也要发出去')
+    assert.equal(count, 1)
+    assert.equal(attempts, 2)
+    assert.equal(env.client.sent.at(-1).text, '重试也要发出去')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a persistent send failure is contained, recorded and reported', async () => {
+  const env = await setup()
+  try {
+    env.client.sendText = async () => {
+      throw new Error('network down')
+    }
+    // Delivery no longer throws: one lost chunk must not abort the rest of an
+    // answer. The failure is surfaced through /status and a best-effort notice.
+    const sent = await env.bridge.deliver('p2p:user@im.wechat', '发不出去')
+    assert.equal(sent, 0)
+    assert.match(env.store.state.stats.lastError.message, /network down/)
+    const info = await env.bridge.describeConversation('p2p:user@im.wechat')
+    assert.match(info.stats.lastError.message, /回复发送失败/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a later chunk is still attempted after an earlier one fails', async () => {
+  const env = await setup()
+  try {
+    const original = env.client.sendText.bind(env.client)
+    let call = 0
+    env.client.sendText = async (payload) => {
+      call += 1
+      if (call === 1) throw new Error('first chunk lost')
+      return original(payload)
+    }
+    const sent = await env.bridge.deliver('p2p:user@im.wechat', '第一段\n\n第二段', { })
+    void sent
+    const texts = env.client.sent.map((entry) => entry.text)
+    assert.ok(texts.some((text) => /第二段/.test(text)), 'the tail of the answer must still be sent')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('idle agents are released, and the conversation resumes on the next message', async () => {
+  const env = await setup({ config: { idleDisposeMinutes: 0.03, typing: false }, harness: { reply: '回答' } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '第一句' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const sessionId = env.harness.agents[0].session.id
+
+    // Too early: the conversation is not idle yet.
+    assert.equal(await env.bridge.disposeIdleAgents(), 0)
+
+    // After the quiet period the background sweep releases the agent on its own.
+    await waitFor(() => env.harness.disposed.length === 1, { timeoutMs: 8_000, label: 'idle release' })
+    assert.deepEqual(env.harness.disposed, [sessionId])
+    assert.equal(env.harness.agents.length, 0)
+    // A second sweep has nothing left to do.
+    assert.equal(await env.bridge.disposeIdleAgents(), 0)
+    // The binding survives, so the next message resumes the same session.
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), sessionId)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '第二句', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.equal(env.harness.agents.length, 1)
+    assert.equal(env.harness.agents[0].session.id, sessionId)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a session with a turn in flight is never treated as idle', async () => {
+  const env = await setup({ config: { idleDisposeMinutes: 0.01 }, harness: { respond: ({ defer }) => defer() } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '慢慢跑' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    // The turn never ended, so the agent must stay alive.
+    assert.equal(await env.bridge.disposeIdleAgents(), 0)
+    assert.equal(env.harness.disposed.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a new session mounts the deployment agent preset, which is what carries the tools', async () => {
+  const mounted = []
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: {
+        agentPresets: {
+          resolve: async (id) => ({ id: id ?? 'standard' }),
+          mount: async (agentCtx, id) => {
+            mounted.push({ agentCtx, id })
+            return { id }
+          },
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(mounted.length, 1, 'the preset must be mounted during setup')
+    assert.equal(mounted[0].id, 'standard')
+    assert.equal(env.harness.agents[0].setupRan, true)
+    // The header records it too, so the GUI shows the session's preset.
+    assert.equal(env.harness.agents[0].session.header.agentPreset, 'standard')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an explicit configured preset wins over the deployment default', async () => {
+  const resolvedWith = []
+  const env = await setup({
+    config: { agentPreset: 'minimal' },
+    harness: {
+      services: {
+        agentPresets: {
+          resolve: async (id) => {
+            resolvedWith.push(id)
+            return { id: id ?? 'standard' }
+          },
+          mount: async () => ({ id: 'minimal' }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.deepEqual(resolvedWith, ['minimal'])
+    assert.equal(env.harness.agents[0].session.header.agentPreset, 'minimal')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a resumed conversation is mounted with the preset too', async () => {
+  const mounted = []
+  const env = await setup({
+    harness: {
+      services: {
+        agentPresets: {
+          resolve: async () => ({ id: 'standard' }),
+          mount: async (agentCtx, id) => {
+            mounted.push(id)
+            return { id }
+          },
+        },
+      },
+    },
+  })
+  try {
+    await env.store.setSession('p2p:user@im.wechat', 'session-existing')
+    await env.bridge.handleInbound(inboundMessage({ text: '继续' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(env.harness.agents[0].session.id, 'session-existing')
+    assert.deepEqual(mounted, ['standard'], 'resume must restore the tool-carrying preset')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a profile without agentPresets degrades with a warning instead of failing', async () => {
+  const env = await setup({ harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) } } })
+  try {
+    // No agentPresets service at all.
+    assert.equal(await env.bridge.resolveAgentPreset(), null)
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.client.sent.length > 0)
+    assert.equal(env.harness.agents.length, 1)
+    assert.equal(env.harness.agents[0].session.header.agentPreset, undefined)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/status reports the preset a session runs', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        agentPresets: {
+          resolve: async () => ({ id: 'standard' }),
+          mount: async () => ({ id: 'standard' }),
+          composedPreset: () => 'standard',
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /状态：/.test(entry.text)))
+    const status = env.client.sent.map((entry) => entry.text).find((text) => /状态：/.test(text))
+    assert.match(status, /预设：standard/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/session hides child sessions and archived conversations, like the GUI list', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: {
+          list: () => [{ path: '/tmp' }],
+          archivedSessionIds: ['session-archived'],
+        },
+        sessionQuery: {
+          listSessions: async () => [
+            { header: { id: 'session-main', cwd: '/tmp', createdAt: 5_000 } },
+            { header: { id: 'session-child', cwd: '/tmp', createdAt: 6_000, parentSession: 'session-main' } },
+            { header: { id: 'session-archived', cwd: '/tmp', createdAt: 4_000 } },
+          ],
+          readTitleSnapshots: async (ids) => ids.map(() => ({ status: 'rejected', reason: new Error('no title') })),
+          readTitle: async (id) => (id === 'session-main' ? '打开 finder 问题' : undefined),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const list = env.client.sent[0].text
+    assert.match(list, /打开 finder 问题/, 'the GUI title must be shown')
+    assert.ok(!list.includes('session-child'), 'subagent sessions must stay hidden')
+    assert.ok(!list.includes('已归档对话\n'), 'archived conversations must not be offered')
+    assert.match(list, /已隐藏 1 个子会话/)
+    assert.match(list, /已隐藏 1 个已归档对话/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/session sources reports where each name came from', async () => {
+  let single = 0
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }], archivedSessionIds: [] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-one', cwd: '/tmp', createdAt: 1 } }],
+          readTitleSnapshots: async () => {
+            throw new Error('index closed')
+          },
+          readTitle: async () => {
+            single += 1
+            return '中文标题'
+          },
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session sources' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const report = env.client.sent[0].text
+    assert.match(report, /标题批量折叠：failed: index closed/)
+    assert.match(report, /标题单条回退：1\/1/)
+    assert.match(report, /拿到标题：1/)
+    assert.equal(single, 1)
+
+    // …and the listing itself recovered the name through the fallback.
+    await env.bridge.handleInbound(inboundMessage({ text: '/session', id: 2 }))
+    await waitFor(() => env.client.sent.length === 2)
+    assert.match(env.client.sent[1].text, /中文标题/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a title snapshot is rendered as text, never as [object Object]', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: fakeSessionQuery([
+          {
+            header: { id: 'session-titled', cwd: '/tmp', createdAt: 1_000 },
+            title: 'Deepseek-harness 修改文件打开 finder 问题',
+          },
+        ]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session' }))
+    await waitFor(() => env.client.sent.length === 1)
+    const list = env.client.sent[0].text
+    assert.ok(!list.includes('[object Object]'), 'a snapshot must never be interpolated raw')
+    assert.match(list, /Deepseek-harness 修改文件打开 finder 问题/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('the live title service returns snapshots too', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        // No query service at all: the title must come from `sessionTitle.get`.
+        sessionTitle: { get: () => ({ title: '运行中对话的名字', source: { kind: 'user' } }) },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '/session', id: 2 }))
+    await waitFor(() => env.client.sent.length >= 2)
+    const list = env.client.sent.map((entry) => entry.text).find((text) => /下的对话/.test(text))
+    assert.match(list, /运行中对话的名字/)
+    assert.ok(!list.includes('[object Object]'))
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('the recap and the depth answer never enter the DSH conversation', async () => {
+  const events = [
+    { type: 'user/message', data: { message: { content: '旧问题一' } } },
+    { type: 'assistant/message', data: { message: { content: '旧回答一' } } },
+    { type: 'user/message', data: { message: { content: '旧问题二' } } },
+    { type: 'assistant/message', data: { message: { content: '旧回答二' } } },
+  ]
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-quiet', cwd: '/tmp', createdAt: 1 } }],
+          readTitleSnapshots: async () => [{ status: 'fulfilled', value: { title: { title: '安静对话' } } }],
+          readTitle: async () => ({ title: '安静对话' }),
+          readSession: async () => ({ events }),
+        },
+      },
+    },
+  })
+  try {
+    // 1) Selecting the conversation opens no agent by itself.
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-quiet' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    assert.equal(env.harness.agents.length, 0, 'selecting a conversation must not open a session')
+
+    // 2) The depth answer is consumed by the plugin: no turn, no session, recap outbound only.
+    const before = env.client.sent.length
+    await env.bridge.handleInbound(inboundMessage({ text: '2', id: 2 }))
+    await waitFor(() => env.client.sent.length >= before + 2)
+    assert.equal(env.harness.agents.length, 0, 'answering the depth must not open a session either')
+    assert.equal(env.harness.followups?.length ?? 0, 0, 'nothing may be sent to an agent yet')
+    assert.ok(
+      env.client.sent.some((entry) => /旧问题二/.test(entry.text)),
+      'the recap still reaches WeChat',
+    )
+
+    // 3) The next real message carries only what the user typed — no recap preamble.
+    await env.bridge.handleInbound(inboundMessage({ text: '只发这句话', id: 3 }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+    assert.equal(agent.session.id, 'session-quiet', 'the message continues the selected conversation')
+    assert.equal(agent.prompts.length, 1)
+    assert.equal(agent.prompts[0], '只发这句话', 'the model must see the user text and nothing else')
+    assert.ok(!agent.prompts[0].includes('旧回答'), 'the recap must not leak into the model context')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('the depth answer is accepted with and without a slash', async () => {
+  const events = [
+    { type: 'user/message', data: { message: { content: '旧问题' } } },
+    { type: 'assistant/message', data: { message: { content: '旧回答' } } },
+  ]
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-slash', cwd: '/tmp', createdAt: 1 } }],
+          readTitleSnapshots: async () => [{ status: 'fulfilled', value: { title: { title: '斜杠对话' } } }],
+          readTitle: async () => ({ title: '斜杠对话' }),
+          readSession: async () => ({ events }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-slash' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    await env.bridge.handleInbound(inboundMessage({ text: '/1', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /段回执/.test(entry.text)))
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat'), null, '/1 answers the question')
+    assert.equal(env.harness.agents.length, 0, '/1 must not become a turn')
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-slash')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a conversation already bound to another WeChat chat cannot be taken over', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: fakeSessionQuery([{ header: { id: 'session-shared', cwd: '/tmp', createdAt: 1 }, title: '独占对话' }]),
+      },
+    },
+  })
+  try {
+    // Another WeChat contact holds the conversation.
+    await env.store.setSession('p2p:someone-else@im.wechat', 'session-shared')
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-shared' }))
+    await waitFor(() => env.client.sent.length === 1)
+    assert.match(env.client.sent[0].text, /正绑定在微信会话/)
+    assert.match(env.client.sent[0].text, /联系人…wechat/)
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), undefined, 'the takeover must be refused')
+
+    // Once the holder releases it, the conversation is free again.
+    await env.store.setSession('p2p:someone-else@im.wechat', null)
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-shared', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /已切换到对话/.test(entry.text)))
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-shared')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('one WeChat chat holds exactly one session at a time', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: fakeSessionQuery([
+          { header: { id: 'session-one', cwd: '/tmp', createdAt: 2 }, title: '对话一' },
+          { header: { id: 'session-two', cwd: '/tmp', createdAt: 1 }, title: '对话二' },
+        ]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-one' }))
+    await waitFor(() => env.store.sessionFor('p2p:user@im.wechat') === 'session-one')
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-two', id: 2 }))
+    await waitFor(() => env.store.sessionFor('p2p:user@im.wechat') === 'session-two')
+    // The old binding is gone: only one session per chat.
+    const bindings = Object.entries(env.store.state.sessions).filter(([, value]) => value === 'session-one')
+    assert.deepEqual(bindings, [], 'the previous session must be released')
+    assert.equal(env.bridge.conversationForSession('session-one'), undefined)
+    assert.equal(env.bridge.conversationForSession('session-two'), 'p2p:user@im.wechat')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a turn started outside WeChat is never answered into the chat', async () => {
+  const env = await setup({
+    harness: {
+      reply: '这是微信回合的答案',
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: fakeSessionQuery([{ header: { id: 'session-gui', cwd: '/tmp', createdAt: 1 }, title: 'GUI 对话' }]),
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-gui' }))
+    await waitFor(() => env.store.sessionFor('p2p:user@im.wechat') === 'session-gui')
+    const before = env.client.sent.length
+
+    // The GUI (or another client) runs a turn in that very session.
+    const session = { id: 'session-gui', header: { id: 'session-gui', cwd: '/tmp' } }
+    env.bridge.onSessionEvent(session, { type: 'turn/start', data: { turn: 7 } })
+    env.bridge.onSessionEvent(session, {
+      type: 'assistant/message',
+      data: { turn: 7, message: { content: '这是 GUI 里跑出来的答案' } },
+    })
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 7, reason: { kind: 'done' } } })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(env.client.sent.length, before, 'a GUI turn must not be pushed to WeChat')
+
+    // A WeChat message in the same session is still answered normally.
+    await env.bridge.handleInbound(inboundMessage({ text: '微信问的', id: 2 }))
+    await waitFor(() => env.client.sent.length > before)
+    assert.ok(
+      env.client.sent.some((entry) => /这是微信回合的答案/.test(entry.text)),
+      'a WeChat turn must still be answered',
+    )
+    assert.ok(
+      !env.client.sent.some((entry) => /GUI 里跑出来的答案/.test(entry.text)),
+      'the GUI turn must never reach WeChat',
+    )
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('tools keep running when the progress notifications are switched off', async () => {
+  // `showToolProgress: false` gates exactly one thing: whether a `tool/call` event is
+  // echoed to WeChat. The tools themselves come from the mounted agent preset.
+  const calls = []
+  const env = await setup({
+    config: { showToolProgress: false },
+    harness: {
+      reply: '已经跑完了',
+      respond: ({ agent, emit, defer }) => {
+        defer()
+        const session = agent.session
+        emit('session/event', session, { type: 'turn/start', data: { turn: 1 } })
+        emit('session/event', session, { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"npm test"}' } })
+        calls.push('bash')
+        emit('session/event', session, { type: 'tool/call', data: { turn: 1, step: 2, callId: 'c2', name: 'read', arguments: '{"file_path":"/tmp/a"}' } })
+        calls.push('read')
+        emit('agent/assistant-stream', { agent, frame: { type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 3 } })
+        for (const piece of ['已经', '跑完了']) {
+          emit('agent/assistant-stream', {
+            agent,
+            frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: Date.now(), chunk: { type: 'text-delta', index: 0, text: piece } },
+          })
+        }
+        emit('agent/assistant-stream', {
+          agent,
+          frame: { type: 'end', attemptId: 'a1', revision: 1, index: 1, outcome: { kind: 'committed', eventType: 'assistant/message', seq: 1 } },
+        })
+        emit('session/event', session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '跑一下测试' }))
+    await waitFor(() => env.client.sent.some((entry) => /已经跑完了/.test(entry.text)))
+    // The tools ran…
+    assert.deepEqual(calls, ['bash', 'read'])
+    // …but nothing about them was pushed to the chat.
+    assert.equal(env.client.sent.length, 1, `expected only the answer, got ${JSON.stringify(env.client.sent.map((e) => e.text))}`)
+    assert.ok(!env.client.sent.some((entry) => entry.text.includes('🔧')))
+    // And the answer itself is intact.
+    assert.equal(env.client.sent[0].text, '已经跑完了')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an approval raised by a delegated sub-agent is answerable from WeChat', async () => {
+  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const rootId = env.harness.agents[0].session.id
+
+    // The sub-agent runs in its own session whose parent is the bound conversation.
+    const childId = 'session-child-approval'
+    env.harness.sessions.set(childId, { id: childId, header: { id: childId, cwd: '/tmp', parentSession: rootId } })
+    const childAgent = { id: childId, session: { id: childId, header: { id: childId, cwd: '/tmp', parentSession: rootId } } }
+
+    // The mapping walks up to the chat that owns the tree.
+    assert.equal(env.bridge.conversationForSession(childId), 'p2p:user@im.wechat')
+
+    const pending = env.interactions.handleApproval(
+      { agent: childAgent, toolName: 'bash', signal: new AbortController().signal },
+      async () => 'delegated',
+    )
+    await waitFor(() => env.interactions.isWaiting('p2p:user@im.wechat'))
+    // The prompt reaches WeChat…
+    await waitFor(() => env.client.sent.some((entry) => /需要你确认/.test(entry.text)))
+    // …and the WeChat reply answers it instead of becoming a new turn.
+    assert.equal(env.interactions.tryConsume('p2p:user@im.wechat', '允许'), true)
+    assert.equal(await pending, 'allowed-once')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('an unrecognised reply while an approval is pending gets one reminder', async () => {
+  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+    const pending = env.interactions.handleApproval(
+      { agent, toolName: 'bash', signal: new AbortController().signal },
+      async () => 'delegated',
+    )
+    await waitFor(() => env.interactions.isWaiting('p2p:user@im.wechat'))
+
+    // A message that is not an answer still becomes a turn, but the user is reminded.
+    await env.bridge.handleInbound(inboundMessage({ text: '顺手把日志也清一下', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /还在等你确认/.test(entry.text)))
+    const reminders = env.client.sent.filter((entry) => /还在等你确认/.test(entry.text))
+    assert.equal(reminders.length, 1)
+
+    // Only once per interaction: a second unrecognised message adds no more noise.
+    await env.bridge.handleInbound(inboundMessage({ text: '顺便看看磁盘', id: 3 }))
+    await waitFor(() => env.harness.agents[0].prompts.length >= 2)
+    assert.equal(env.client.sent.filter((entry) => /还在等你确认/.test(entry.text)).length, 1)
+
+    assert.equal(env.interactions.tryConsume('p2p:user@im.wechat', '拒绝'), true)
+    assert.equal(await pending, 'rejected')
+  } finally {
+    await env.cleanup()
+  }
+})

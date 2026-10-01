@@ -1,0 +1,65 @@
+{
+  "name": "dsh-wechat",
+  "version": "0.1.25",
+  "description": "把 DeepSeek Harness 接进微信：扫码绑定后在微信里派活、收结果、回审批（iLink/ClawBot 协议）",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "cordis-plugin",
+    "wechat",
+    "wechat-bot",
+    "ilink",
+    "clawbot"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-wechat": "./bin/dsh-wechat.mjs"
+  },
+  "files": [
+    "README.md",
+    "bin",
+    "cordis.patch.yml",
+    "docs",
+    "lib",
+    "scripts"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "login": "node bin/dsh-wechat.mjs login",
+    "upgrade": "node scripts/upgrade.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "qrcode": "^1.5.4"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "author": "zgat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zgat/dsh-wechat.git"
+  },
+  "homepage": "https://github.com/zgat/dsh-wechat#readme",
+  "bugs": {
+    "url": "https://github.com/zgat/dsh-wechat/issues"
+  }
+}

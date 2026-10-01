@@ -1,0 +1,16 @@
+# dsh-wechat bundle patch — one inserted row over the profile root.
+#
+# Install:
+#   dsh plugin --profile <profile> add /path/to/dsh-wechat   # or the published package name
+#
+# The row's `config` is the plugin's own configuration; see README.md. A user
+# patch may override any key here by repeating this row id (`dsh-wechat`) with a
+# complete config object, because a patch replaces the whole `config` value.
+- insert:
+    - id: dsh-wechat
+      name: 'dsh-wechat'
+      config:
+        enabled: true
+        accessPolicy: allowlist
+        typing: true
+        progress: brief
