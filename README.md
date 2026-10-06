@@ -46,6 +46,29 @@
 - `/status` 同时给出**运行中的版本**与**磁盘已装版本**（不一致会提示重启）；`/session sources` 打印会话来源诊断；每次启动写 `boots` 记录
 - 命令行：`dsh-wechat login|status|logout|send|qr`；仓库脚本：`upgrade.mjs`（打包/安装/校验）、`restart-dsh.sh`（带护栏与验证的重启）
 
+## 权限、外部依赖与失败边界
+
+这一节按 [DSH STORE 的上架契约](https://github.com/AI-Scarlett/DSH-Store/blob/main/registry/README.md) 显式披露能力与边界。**本插件是宿主侧插件，以 DSH 进程权限运行**——安装前请据此评估。
+
+| 能力 | 用在哪里 | 范围与限制 |
+| --- | --- | --- |
+| **文件** | 状态目录 `$DSH_HOME/integrations/dsh-wechat`（凭据/游标/绑定/启动记录，`0600`，目录 `0700`）、媒体目录（默认其下 `media/`，入站附件落盘 `0600`）、扫码页的二维码与 URL 文件 | 不写工作区、不写系统目录（`LaunchAgents`/`crontab`/`systemd` 一律不碰）；写入原子化并带瞬时错误重试 |
+| **网络** | 出站长轮询与发消息（默认 `https://ilinkai.weixin.qq.com`）、附件上传下载（默认 `https://novac2c.cdn.weixin.qq.com/c2c`）、回环扫码页（`127.0.0.1:30989`，可关） | 目标可用配置覆盖但强校验（公网强制 https）；所有请求 `redirect:'error'`；**无遥测、无第三方端点**（由 `test/sideeffects.test.mjs` 的出站白名单强制） |
+| **命令/子进程** | 仅一处：在扫码登录时用系统启动器打开浏览器（macOS `open` / Linux `xdg-open` / Windows `cmd /c start`） | 非 http(s) 输入在 `spawn` 之前即被拒绝；可注入（测试不产生真实进程）；`openLoginPage: false` 可整体关闭 |
+| **凭据** | 读取并保存机器人令牌（`credentials.json`，`0600`；也可由环境变量提供，此时不落盘）；日志与工具参数对密钥形态**双重脱敏** | 不读取系统钥匙串、不读取无关环境变量；`/logout` 仅所有者可用 |
+| **原生制品** | 无 | 零运行时依赖、无原生模块，安装不触发编译 |
+| **受保护的 DSH 行为** | 不修改、不遮蔽、不重复安装任何 `@deepseek-ai/*` 组件 | 只通过 `ctx.get(key)` 使用宿主服务，入口 ID 唯一 |
+
+**外部服务**：微信 iLink 网关（必需，聊天与登录）、媒体 CDN（仅在收发附件时）。二者皆非本仓库所有，可用性取决于腾讯侧。
+
+**权限等级自评：`high`** —— 触及凭据、任意网络、会话持久状态与插件生命周期（含子进程）。因此本插件**不可能**满足 DSH STORE 的自动低风险通道（该通道要求文件/网络/命令/凭据信号全为否），预期状态是 `user-reviewed` / `blocked`，由使用者逐次审阅安装。
+
+**失败边界**：网络失败指数退避重试且不丢游标；登录失效（`ret=-14`）自动清理凭据并重登；回复分段失败只丢那一段并明确告知；状态文件损坏则改名留档后从空状态启动；插件异常不会阻断 DSH——停用或卸载即恢复原状（副作用清单见 [docs/side-effects.md](docs/side-effects.md)）。
+
+**一次性 Profile 证据**：安装 / 组合 / 卸载的可复现验证记录在 [docs/profile-verification.md](docs/profile-verification.md)（`scripts/verify-profile-install.sh`，全程在临时 `DSH_HOME` 中，不碰真实 profile）。
+
+**兼容性**：DSH `0.2.0-rc.2`（端到端实测；`0.2.0-rc.1` 与 `0.2.1-alpha.1` 未验证）、Node `>= 20`、profile `desktop` 实测（web/tui 等只要提供 `agents`/`sessions` 服务即可运行）、系统 macOS 实测 / Linux 与 Windows 路径已审计。
+
 ## 设计与实现
 
 ```
@@ -75,7 +98,7 @@ iLink 网关 ──HTTP──> channel.js ──> bridge.js ──> agents/sessi
 # 1) 安装（二选一）
 #    a. GUI：设置 → 插件 → 安装，粘贴 tarball 路径（宿主自己热重载，通常无需重启）
 #    b. 终端：
-dsh plugin --profile desktop add ./dsh-wechat-0.1.26.tgz
+dsh plugin --profile desktop add ./dsh-wechat-0.1.27.tgz
 
 # 2) 扫码绑定（生成二维码 + 回环扫码页）
 node bin/dsh-wechat.mjs login --page
