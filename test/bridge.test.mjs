@@ -2389,3 +2389,140 @@ test('full access needs the explicit confirmation word', async () => {
     await env.cleanup()
   }
 })
+
+test('/listen starts forwarding turns that other clients started', async () => {
+  const env = await setup({
+    harness: {
+      reply: '微信自己的回答',
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const sessionId = env.harness.agents[0].session.id
+    const before = env.client.sent.length
+
+    // A GUI turn in the same session is ignored while the feed is off.
+    const session = env.harness.agents[0].session
+    env.bridge.onSessionEvent(session, {
+      type: 'assistant/message',
+      data: { turn: 42, message: { role: 'assistant', content: [{ type: 'text', text: 'GUI 的答案' }] } },
+    })
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 42, reason: { kind: 'completed' } } })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(env.client.sent.length, before, 'off by default')
+    assert.equal(env.bridge.isFollowing('p2p:user@im.wechat'), false)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/listen', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /已开始接收/.test(entry.text)))
+    assert.equal(env.bridge.isFollowing('p2p:user@im.wechat'), true)
+
+    // Now the same GUI turn is forwarded, labelled as coming from elsewhere.
+    env.bridge.onSessionEvent(session, {
+      type: 'assistant/message',
+      data: { turn: 43, message: { role: 'assistant', content: [{ type: 'text', text: 'GUI 的答案二' }] } },
+    })
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 43, reason: { kind: 'completed' } } })
+    await waitFor(() => env.client.sent.some((entry) => /GUI 的答案二/.test(entry.text)))
+    const forwarded = env.client.sent.map((entry) => entry.text).find((text) => /GUI 的答案二/.test(text))
+    assert.match(forwarded, /📥 其他客户端/)
+    assert.match(forwarded, new RegExp(sessionId.slice(-8)))
+
+    // A failure with no text is still reported, so the chat is not left guessing.
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 44, reason: { kind: 'error' } } })
+    await waitFor(() => env.client.sent.some((entry) => /没有文本输出/.test(entry.text)))
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/mute stops the feed again, and WeChat-initiated turns are never duplicated', async () => {
+  const env = await setup({
+    harness: { reply: '微信自己的回答', agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) } },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const session = env.harness.agents[0].session
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/listen', id: 2 }))
+    await waitFor(() => env.bridge.isFollowing('p2p:user@im.wechat'))
+
+    // A turn this chat asked for goes through the pending path exactly once: the feed
+    // must not echo a second copy of it.
+    const beforeOwn = env.client.sent.length
+    await env.bridge.handleInbound(inboundMessage({ text: '再答一次', id: 3 }))
+    await waitFor(() => env.harness.agents[0].prompts.length >= 2)
+    await waitFor(() => env.client.sent.length > beforeOwn)
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const answers = env.client.sent.filter((entry) => entry.text === '微信自己的回答')
+    assert.equal(answers.length, 2, `expected two answers (one per turn), got ${JSON.stringify(env.client.sent.map((e) => e.text.slice(0, 30)))}`)
+    assert.ok(!env.client.sent.some((entry) => /📥/.test(entry.text)), 'no follow-up copy of our own turn')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/mute', id: 4 }))
+    await waitFor(() => env.client.sent.some((entry) => /已停止接收/.test(entry.text)))
+    assert.equal(env.bridge.isFollowing('p2p:user@im.wechat'), false)
+
+    const before = env.client.sent.length
+    env.bridge.onSessionEvent(session, {
+      type: 'assistant/message',
+      data: { turn: 77, message: { role: 'assistant', content: [{ type: 'text', text: '不该出现' }] } },
+    })
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 77, reason: { kind: 'completed' } } })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(env.client.sent.length, before, 'nothing is forwarded after /mute')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/listen binds a session when the chat has none yet, and /status shows the feed', async () => {
+  const env = await setup({
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) } },
+  })
+  try {
+    assert.equal(env.store.sessionFor('p2p:user@im.wechat'), undefined)
+    await env.bridge.handleInbound(inboundMessage({ text: '/listen' }))
+    await waitFor(() => env.bridge.isFollowing('p2p:user@im.wechat'))
+    assert.ok(env.store.sessionFor('p2p:user@im.wechat'), 'following creates the binding it will follow')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /状态：/.test(entry.text)))
+    const status = env.client.sent.map((entry) => entry.text).find((text) => /状态：/.test(text))
+    assert.match(status, /接收其它客户端的回合：开/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a turn whose stream produced nothing still answers from the committed message', async () => {
+  // Regression: the committed-message fallback never ran because `messageText` was not
+  // imported, so the branch threw and the text was silently lost. This drives a turn
+  // that emits NO stream frames — only the session's committed assistant message.
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ agent, emit, defer }) => {
+        defer()
+        const turn = 1
+        emit('session/event', agent.session, { type: 'turn/start', data: { turn } })
+        emit('session/event', agent.session, {
+          type: 'assistant/message',
+          // The host commits content as text blocks, not as a bare string.
+          data: { turn, message: { role: 'assistant', content: [{ type: 'text', text: '只有提交消息，没有流式输出' }] } },
+        })
+        emit('session/event', agent.session, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '跑一轮' }))
+    await waitFor(() => env.client.sent.some((entry) => /只有提交消息/.test(entry.text)), {
+      label: 'committed-text fallback delivered',
+    })
+    assert.ok(env.client.sent.some((entry) => /只有提交消息，没有流式输出/.test(entry.text)))
+  } finally {
+    await env.cleanup()
+  }
+})

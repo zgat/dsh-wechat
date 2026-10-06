@@ -13,6 +13,7 @@ import { expandHome, isInsideDirectory, unquote } from '../lib/bridge.js'
 import { withRetries } from '../lib/retry.js'
 import { sleep } from '../lib/waits.js'
 import { describeVersion } from '../lib/commands.js'
+import { messageText } from '../lib/harness.js'
 import os from 'node:os'
 import path from 'node:path'
 import { createLogger } from '../lib/log.js'
@@ -438,4 +439,11 @@ test('the restart job is a one-shot LaunchAgent on internal paths only', async (
   assert.ok(!internalScriptPath().startsWith('/Volumes/'), `helper must live on the internal disk: ${internalScriptPath()}`)
   assert.ok(internalScriptPath().startsWith(os.homedir()), 'helper lives under HOME')
   assert.match(plistPath(), /Library\/LaunchAgents\/com\.zgat\.dsh-wechat-restart\.plist$/)
+})
+
+test('messageText reads both committed shapes', () => {
+  // Blocks are what the host commits; a bare string must not silently become "".
+  assert.equal(messageText({ content: [{ type: 'text', text: 'a' }, { type: 'image' }, { type: 'text', text: 'b' }] }), 'ab')
+  assert.equal(messageText({ content: 'plain' }), 'plain')
+  assert.equal(messageText(undefined), '')
 })
