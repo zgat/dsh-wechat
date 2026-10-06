@@ -423,7 +423,10 @@ test('the restart job is a one-shot LaunchAgent on internal paths only', async (
   assert.match(xml, /<key>KeepAlive<\/key><false\/>/)
   assert.match(xml, /<string>com\.zgat\.dsh-wechat-restart<\/string>/)
   assert.match(xml, /--delay 10/)
-  assert.match(xml, /DSH_RESTART_FORCE=1/)
+  // The flag must be an assignment prefix, not a standalone statement, or it never
+  // reaches the script and its guard skips the restart (this shipped once).
+  assert.match(xml, /DSH_RESTART_FORCE=1 &quot;|DSH_RESTART_FORCE=1 "/)
+  assert.ok(!/DSH_RESTART_FORCE=1;/.test(xml), 'a separate statement would not export the flag')
   // Shell metacharacters must be XML-escaped or launchd refuses the file.
   assert.equal(xmlEscape('a && b > c'), 'a &amp;&amp; b &gt; c')
   assert.match(xml, /2&gt;\/dev\/null/)

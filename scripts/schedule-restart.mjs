@@ -48,9 +48,12 @@ export function xmlEscape(value) {
 export function buildPlist(options) {
   const label = options.label ?? LABEL
   const logFile = options.logFile ?? '$HOME/dsh-wechat-restart.log'
+  // The force flag is an *assignment prefix* on the same command: written as a
+  // separate statement it would not reach the script's environment, and the script's
+  // re-entry guard would silently skip the restart.
+  const invocation = `${options.force ? 'DSH_RESTART_FORCE=1 ' : ''}"${options.scriptPath}" --delay ${options.delaySeconds}`
   const command = [
-    options.force ? 'DSH_RESTART_FORCE=1' : null,
-    `"${options.scriptPath}" --delay ${options.delaySeconds}`,
+    invocation,
     // Cleanup before bootout: unloading kills this job's process tree, so anything
     // after it would never run (that is how a stale plist survived once).
     `rm -f "$HOME/Library/LaunchAgents/${label}.plist"`,
