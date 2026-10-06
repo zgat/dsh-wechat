@@ -415,14 +415,24 @@ test('the scan page is also served from the harness web server when one exists',
     const denied = await call('/dsh-wechat/')
     assert.equal(denied.statusCode, 403)
 
+    // The page learns the QR one gateway round trip *after* the URL is logged (the
+    // channel publishes it from its login flow), so poll the state route instead of
+    // racing the publish with an immediate assertion.
+    const state = await waitFor(
+      async () => {
+        const probe = await call(`/dsh-wechat/state.json?t=${token}`)
+        if (probe.statusCode !== 200) return null
+        const body = JSON.parse(probe.body)
+        return body.hasQr ? body : null
+      },
+      { timeoutMs: 8_000, label: 'page received the QR' },
+    )
+    assert.equal(state.hasQr, true)
+
     const page = await call(`/dsh-wechat/?t=${token}`)
     assert.equal(page.statusCode, 200)
     assert.match(page.headers['Content-Type'], /text\/html/)
     assert.ok(page.body.includes('<svg'), 'the GUI route serves the scan code')
-
-    const state = await call(`/dsh-wechat/state.json?t=${token}`)
-    assert.equal(state.statusCode, 200)
-    assert.equal(JSON.parse(state.body).hasQr, true)
 
     await fiber.dispose()
     fiber = null
