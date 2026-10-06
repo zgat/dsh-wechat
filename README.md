@@ -77,61 +77,19 @@
 ## 设计与实现
 
 ```
-iLink 网关 ──HTTP──> channel.js ──> bridge.js ──> agents/sessions (DSH)
-   ▲                    │              │
-   └── 长轮询/游标 ──────┘              ├─ 会话绑定表、回合队列、超时、空闲回收
-   ▲                                   ├─ 投递：分段、重试、进度、附件
-   └── 出站消息 <── deliver() <────────┘
-审批/提问瀑布 <── approval.js（认领回复槽 → 解析「允许/拒绝/序号」）
-指令 ──────────> commands.js（/session /workspace /model …）
-```
-
-几条刻意的设计决定：
-
-| 决定 | 原因 |
-| --- | --- |
-| **会话只有一处写入点**（用户原文 `followup`） | 回执、提示、欢迎语、失败通知全部单向出站，绝不污染模型上下文；有测试锁定 |
-| **按回合号配对回复** | 同一个 session 可能被 GUI 一起喂，只有"微信发起的回合"才回微信 |
-| **零运行时依赖、无原生模块** | 安装不会碰 node-gyp；peer 依赖会让 profile 安装卡范围校验，所以直接用 `ctx.get(key)` 取宿主服务 |
-| **状态目录一切自理**（0600/0700 + 原子写 + 损坏留档） | 凭据与附件是敏感数据；Windows 上用重试兜住 `EPERM/EBUSY` |
-| **副作用预算化** | 子进程只有一处且先校验、只绑回环、出站域名白名单、定时器必须 `unref`——`test/sideeffects.test.mjs` 让新增隐式副作用直接失败 |
-| **能力随 preset 走** | DSH 的工具是**按 agent 挂载 preset** 得到的，插件在 `setup` 期 `mount`，创建与恢复都挂 |
-
-## 快速开始
-
-```sh
-# 1) 安装（二选一）
-#    a. GUI：设置 → 插件 → 安装，粘贴 tarball 路径（宿主自己热重载，通常无需重启）
-#    b. 终端：
-dsh plugin --profile desktop add ./dsh-wechat-<版本>.tgz     # 例如 0.1.27
-
-# 2) 扫码绑定（生成二维码 + 回环扫码页）
-node bin/dsh-wechat.mjs login --page
-
-# 3) 微信里给机器人发任意一句话，会收到上手引导（/help 看全部指令）
-```
-
-升级、重启与版本自证的细节见 §3「安装」与 §3.4「升级：为什么有时要重启」。
-以下 §1–§15 是完整手册（安装、配置、用法、实现与排错）。
-
----
-
-## 1. 工作原理
-
-```
 微信 App
    │  扫码绑定 / 私聊消息
    ▼
 腾讯 iLink Bot 网关  https://ilinkai.weixin.qq.com
-   │  getupdates 长轮询（≈35s）          ▲ sendmessage / sendtyping / getuploadurl + AES-128-ECB CDN
-   ▼                                     │
+   │  getupdates 长轮询（≈35s）     ▲ sendmessage / sendtyping / getuploadurl + AES-128-ECB CDN
+   ▼                                │
 ┌──────────────────────────────────────────────────────────────┐
-│ dsh-wechat 插件（运行在 DSH Host 进程内）                      │
+│ dsh-wechat 插件（运行在 DSH Host 进程内）                     │
 │                                                              │
-│ channel.js   登录、长轮询、游标持久化、退避与重登              │
-│ bridge.js    微信会话 ↔ DSH 会话、回合收集、分段回复            │
-│ approval.js  approval/request、user-questions/request 应答     │
-│ tools.js     wechat_* 模型工具                                │
+│ channel.js   登录、长轮询、游标持久化、退避与重登             │
+│ bridge.js    微信会话 ↔ DSH 会话、回合队列、投递、跟读         │
+│ approval.js  approval/request、user-questions/request 认领应答 │
+│ tools.js     wechat_* 模型工具；commands.js 斜杠命令           │
 └──────────────────────────────────────────────────────────────┘
    │  ctx.get('agents').create/resume → agent.followup(用户消息)
    │  ctx.on('agent/assistant-stream' | 'session/event' | 'approval/request')
@@ -145,13 +103,40 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 2. 普通文本 → `agent.followup(createUserMessage(...))` 排入该会话的回合队列；
 3. 回合运行期间监听 `agent/assistant-stream` 收集本轮文本，`session/event` 的 `tool/call` 推送进度；
 4. 收到 `turn/end` → 取**最后一步**的助手文本（而不是中间过程）→ 分段 `sendmessage`；
-5. 若模型调用需要授权的工具，`approval/request` 拦截 → 发微信 → 等你的回复 → 返回 `allowed-once` / `rejected` / `cancelled`。
+5. 需要授权的工具调用由 `approval/request` 拦截 → 发微信 → 等你的回复 → 返回 `allowed-once` / `rejected` / `cancelled`；`ask_user_question` 同理。
+6. 开启 `/listen` 时，没有微信消息在排队的回合（GUI 等客户端发起的）也会按 `turn/end` 推送到微信。
 
-> 设计取舍：iLink 的机器人消息**不能编辑**（`GENERATING` 状态在普通会话里不生效），所以本插件不做"边生成边改同一条消息"的伪流式，而是用「正在输入 + 工具进度 + 最终分段」的方式呈现，避免刷屏。
+几条刻意的设计决定：
+
+| 决定 | 原因 |
+| --- | --- |
+| **会话只有一处写入点**（用户原文 `followup`） | 回执、提示、欢迎语、失败通知、跟读全部单向出站，绝不污染模型上下文；有测试锁定 |
+| **按回合号配对回复** | 同一个 session 可能被 GUI 一起喂，只有"微信发起的回合"走常规投递；跟读是显式 opt-in 的例外 |
+| **零运行时依赖、无原生模块** | 安装不会碰 node-gyp；peer 依赖会让 profile 安装卡范围校验，所以直接用 `ctx.get(key)` 取宿主服务 |
+| **状态目录一切自理**（0600/0700 + 原子写 + 损坏留档） | 凭据与附件是敏感数据；Windows 上用重试兜住 `EPERM/EBUSY` |
+| **副作用预算化** | 子进程只有一处且先校验、只绑回环、出站域名白名单、定时器必须 `unref`——`test/sideeffects.test.mjs` 让新增隐式副作用直接失败 |
+| **能力随 preset 走** | DSH 的工具是**按 agent 挂载 preset** 得到的，插件在 `setup` 期 `mount`，创建与恢复都挂 |
+| **不伪流式** | iLink 的机器人消息不能编辑（`GENERATING` 状态在普通会话不生效），所以用「正在输入 + 工具进度 + 最终分段」呈现，而不是边生成边改同一条 |
+
+## 快速开始
+
+```sh
+# 1) 安装（二选一）
+#    a. GUI：设置 → 插件 → 安装，粘贴 tarball 路径（宿主自己热重载，通常无需重启）
+#    b. 终端：
+dsh plugin --profile desktop add ./dsh-wechat-<版本>.tgz     # 例如 0.1.28
+
+# 2) 扫码绑定（生成二维码 + 回环扫码页）
+node bin/dsh-wechat.mjs login --page
+
+# 3) 微信里给机器人发任意一句话，会收到上手引导（/help 看全部指令）
+```
+
+以下是完整手册 §1–§14（前置条件、安装、扫码、配置、用法、实现与排错）；升级、重启与版本自证的细节见 §2 与 §2.4。
 
 ---
 
-## 2. 前置条件
+## 1. 前置条件
 
 - **DSH 0.2.0-rc.2**（`dsh --version` 或在桌面端「关于」里确认）。
 - Node.js ≥ 20（DSH 桌面端自带的 Node 已满足）。
@@ -160,9 +145,9 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 ---
 
-## 3. 安装
+## 2. 安装
 
-### 3.1 装进一个 profile
+### 2.1 装进一个 profile
 
 ```sh
 # 本地目录 / tarball / npm 包都可以；<profile> 例如 web、desktop
@@ -183,7 +168,7 @@ dsh plugin --profile web add /绝对路径/dsh-wechat
         progress: brief
 ```
 
-### 3.2 覆盖配置
+### 2.2 覆盖配置
 
 在 profile 的 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 里重复该行 id 即可覆盖（**patch 会整体替换 `config`，请写全要保留的键**）：
 
@@ -201,7 +186,7 @@ dsh plugin --profile web add /绝对路径/dsh-wechat
     chunkChars: 1800
 ```
 
-### 3.3 不启动时先自检
+### 2.3 不启动时先自检
 
 ```sh
 dsh --profile web --dump-config | grep -A3 dsh-wechat   # 确认这一层已生效
@@ -210,7 +195,7 @@ dsh --profile web --dump-config | grep -A3 dsh-wechat   # 确认这一层已生�
 ---
 
 
-### 3.4 升级：为什么有时要重启
+### 2.4 升级：为什么有时要重启
 
 DSH 宿主对**配置**改动是热应用的，对**已加载插件的代码**不是。实测（0.2.0-rc.2 桌面端）：
 
@@ -254,7 +239,7 @@ node scripts/upgrade.mjs --check
 
 `--check` 对比三个版本：工作区构建版本、profile 已装版本、**运行中的版本**（插件每次启动写一条 `state.json` 的 `boots` 记录，`/status` 里的「插件版本」也是它）。0.1.16 之前的构建没有启动记录，所以第一次跑会显示"未知"，重启一次后即可精确对比。
 
-## 4. 扫码登录
+## 3. 扫码登录
 
 两种方式，任选其一：
 
@@ -301,14 +286,14 @@ node /绝对路径/dsh-wechat/bin/dsh-wechat.mjs login
 export DSH_WECHAT_BOT_TOKEN=ilinkbot_xxx
 export DSH_WECHAT_BASE_URL=https://ilinkai.weixin.qq.com   # 可选
 export DSH_WECHAT_BOT_ID=xxx@im.bot                        # 可选
-export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所有者（见 §7「谁能用」）
+export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所有者（见 §6「谁能用」）
 ```
 
 环境变量优先于凭据文件，且不会被写回磁盘。**若不给 `DSH_WECHAT_USER_ID`**，这条凭据没有所有者，`ownerUserId` 为空——此时所有被允许的联系人都视同所有者（`/permission`、`/logout` 对所有人开放），无人值守部署请显式指定。
 
 ---
 
-## 5. 配置项
+## 4. 配置项
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -350,18 +335,18 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 
 ---
 
-## 6. 在微信里怎么用
+## 5. 在微信里怎么用
 
 一句话：**你在微信里说的每句话就是给 DSH 的 prompt**，Agent 跑完把最终回答发回这个会话。
 
-常见的几件事（**命令语法与别名统一见 §7**，这里只讲场景）：
+常见的几件事（**命令语法与别名统一见 §6**，这里只讲场景）：
 
 - **派活 / 提问**：直接说话，例如「帮我看下 ~/proj 的测试为什么失败」。
 - **给它材料**：直接发图片或文件（可附一句说明）；插件解密落盘后把本地路径交给 Agent。
 - **要一份产物**：「生成一份 xxx 报告并发给我」——Agent 用 `wechat_send_file` 把文件（或图片）发回微信。
 - **在多个对话之间切换 / 开新对话 / 打断长任务**：用 `/session`、`/new`、`/stop`。
 - **换项目目录、换模型、换思考深度**：用 `/workspace`、`/model`、`/reasoning`——**不带参数时会先列出可选项**（分别来自 DSH 工作区注册表、LLM 目录、当前模型的档位声明），回序号即可。
-- **调整这个对话的权限**：用 `/permission`（只读 / 只能改工作区 / 完全权限），谁能切换见 §7「谁能用：所有者与白名单」。
+- **调整这个对话的权限**：用 `/permission`（只读 / 只能改工作区 / 完全权限），谁能切换见 §6「谁能用：所有者与白名单」。
 
 运行中的表现：
 
@@ -405,7 +390,7 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 - 主动推送依赖最近一次入站消息带来的 `context_token`：太久没互动、或清空了状态后，机器人无法先开口；让对方先发一条消息即可恢复；
 - 一轮默认最多等 15 分钟（`turnTimeoutSeconds`），超时会在微信里提示，但回合仍在后台继续跑完，可用 `/status` 查看。
 
-## 7. 微信里的命令
+## 6. 微信里的命令
 
 | 命令 | 作用 |
 | --- | --- |
@@ -459,7 +444,7 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 
 ---
 
-## 8. Agent 可用的工具
+## 7. Agent 可用的工具
 
 | 工具 | 用途 |
 | --- | --- |
@@ -471,7 +456,7 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 
 ---
 
-## 9. 审批与提问
+## 8. 审批与提问
 
 - **审批**：需要授权的工具调用会暂停，微信收到「🔐 需要你确认一个操作 / 工具 / 原因」。回 `允许`、`同意`、`批准`、`yes` 之一则本次放行（`allowed-once`）；回 `拒绝` 则拒绝；回 `取消` 撤回请求。超时（默认 5 分钟）会转交给下一个应答者——桌面端仍会正常弹窗，所以你两边都能回答。
 - **提问**：`ask_user_question` 的选项会编号发出，回 `1`、`2` 选择；多选回 `1,3`；没有选项或你想自由作答时直接回文字。
@@ -479,7 +464,7 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 
 ---
 
-## 10. 状态、日志与安全
+## 9. 状态、日志与安全
 
 > 插件对系统的全部副作用（进程、端口、文件、定时器、网络出口）逐项列在 [docs/side-effects.md](docs/side-effects.md)，并由 `test/sideeffects.test.mjs` 的 7 条预算断言守住：新增隐式副作用会让测试失败。
 
@@ -504,7 +489,7 @@ $DSH_HOME/integrations/dsh-wechat/
 
 ---
 
-## 11. 故障排查
+## 10. 故障排查
 
 | 现象 | 原因与处理 |
 | --- | --- |
@@ -529,7 +514,7 @@ $DSH_HOME/integrations/dsh-wechat/
 
 ---
 
-## 12. 开发与测试
+## 11. 开发与测试
 
 ```sh
 npm test          # 当前 172 个用例：单元 + 协议 + 桥接 + 扫码页 + 真实 cordis 启动 + CLI
@@ -573,7 +558,7 @@ npm test          # 当前 172 个用例：单元 + 协议 + 桥接 + 扫码页 
 
 ---
 
-## 13. 平台兼容性
+## 12. 平台兼容性
 
 代码没有原生依赖、没有平台专有命令（除了"打开浏览器"这一处按平台分支），但**只在 macOS 上实跑过**。下表区分"已实测"与"已审计未实测"：
 
@@ -599,10 +584,10 @@ node --test test/          # 全部用例（当前 172 条）；其中副作用�
 node bin/dsh-wechat.mjs login --page    # 起扫码页，确认端口与浏览器分支正常
 ```
 
-## 14. 合规提醒
+## 13. 合规提醒
 
 本插件通过腾讯 iLink / ClawBot 的机器人能力接入微信，属于官方扫码绑定路径，但仍请遵守微信与腾讯云的相关协议：不要用于群发营销、批量加好友或其他违反平台规则的行为；账号能否使用该能力由平台决定。
 
-## 15. 许可
+## 14. 许可
 
 MIT
