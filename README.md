@@ -34,6 +34,11 @@
 - 自动挂载部署默认 **agent preset**（`standard`：`tool-bash`、`tool-fs`、`tool-fs-search`、`plan-mode`…）——这是"微信里的 Agent 有手"的关键；未挂载时它只能用插件自己的工具
 - 插件自带工具：`wechat_send_text` / `wechat_send_file` / `wechat_chat_info`，Agent 可主动发消息、回传文件
 
+**权限控制**
+- `/permission` 直接切换**该微信对话所绑定会话**的权限预设（sandbox 模式 + 审批策略）：`read-only` / `workspace-write` / `danger-full-access`
+- 这是 DSH 的**按会话**记录，写进会话日志，重启后依然生效；不同微信对话互不影响
+- 放宽到完全权限需要二次确认（`/permission danger-full-access confirm`），且只有所有者能改；`/status` 会显示当前模式
+
 **安全与可观测**
 - 白名单 + 所有者模型；凭据/状态/附件 `0600`、目录 `0700`；日志与工具参数双重脱敏
 - 发送边界：只允许发给当前会话/所有者/白名单，拒绝状态目录内文件（含软链绕过）
@@ -70,7 +75,7 @@ iLink 网关 ──HTTP──> channel.js ──> bridge.js ──> agents/sessi
 # 1) 安装（二选一）
 #    a. GUI：设置 → 插件 → 安装，粘贴 tarball 路径（宿主自己热重载，通常无需重启）
 #    b. 终端：
-dsh plugin --profile desktop add ./dsh-wechat-0.1.25.tgz
+dsh plugin --profile desktop add ./dsh-wechat-0.1.26.tgz
 
 # 2) 扫码绑定（生成二维码 + 回环扫码页）
 node bin/dsh-wechat.mjs login --page
@@ -396,6 +401,7 @@ export DSH_WECHAT_BASE_URL=https://ilinkai.weixin.qq.com   # 可选
 | --- | --- |
 | `/help`（`/帮助`、`/?`） | 显示帮助 |
 | `/new`（`/新会话`、`/reset`） | 结束当前会话，下一条消息开启新会话（工作区/模型设置保留） |
+| `/permission [模式]`（`/权限`、`/perm`） | 查看/切换**本对话**的权限模式：`read-only`（只读）、`workspace-write`（只能改工作区，默认）、`danger-full-access`（不限制文件且不再询问审批，需回复 `/permission danger-full-access confirm` 二次确认）；仅所有者可切换 |
 | `/session [序号\|会话 ID]`（`/会话`、`/对话`） | 列出当前工作区的对话并切换：**显示的名字就是 DSH 界面里的那个标题**（会话日志的 `session/title` 事件），附时间、「运行中」、「←当前」；切换后立即绑定该对话（历史留在 DSH，下一条消息接着它聊），并询问要不要把最近 N 段**回执到微信**（回复 0-99，不回复＝不回执）；子会话（subagent）与已归档对话不列出；`/session new` 等价 `/new`，`/session sources` 打印来源诊断 |
 | `/stop`（`/停止`） | 停止正在运行的回合（等同界面上的停止按钮） |
 | `/status`（`/状态`） | 连接状态、bot、会话、工作区、模型、队列、统计、最近错误 |

@@ -2280,3 +2280,112 @@ test('an unrecognised reply while an approval is pending gets one reminder', asy
     await env.cleanup()
   }
 })
+
+/** A permission-presets stub shaped like the host service. */
+function fakePermissionPresets(initial = 'workspace-write') {
+  const calls = []
+  const state = new Map()
+  return {
+    calls,
+    names: ['read-only', 'workspace-write', 'danger-full-access'],
+    catalog: () => ({
+      options: [
+        { value: 'read-only', name: 'Read only', description: 'Read files without writing them.' },
+        { value: 'workspace-write', name: 'Workspace write', description: 'Write inside the workspace.' },
+        { value: 'danger-full-access', name: 'Full access', description: 'Full file access without approval prompts.' },
+      ],
+      defaultPreset: initial,
+    }),
+    current: (session) => state.get(session?.id) ?? initial,
+    set: (session, name) => {
+      calls.push({ sessionId: session?.id, name })
+      state.set(session?.id, name)
+    },
+  }
+}
+
+test('/permission reports the mode of the bound conversation', async () => {
+  const presets = fakePermissionPresets('workspace-write')
+  const env = await setup({
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }, services: { permissionPresets: presets } },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '/permission', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /权限模式/.test(entry.text)))
+    const reply = env.client.sent.map((entry) => entry.text).find((text) => /权限模式/.test(text))
+    assert.match(reply, /workspace-write/)
+    assert.match(reply, /read-only/)
+    assert.match(reply, /danger-full-access/)
+    // The current mode is marked, and nothing was changed by reading it.
+    assert.match(reply, /→ workspace-write/)
+    assert.equal(presets.calls.length, 0)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/permission switches the mode and records it for the conversation', async () => {
+  const presets = fakePermissionPresets('workspace-write')
+  const env = await setup({
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }, services: { permissionPresets: presets } },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const sessionId = env.harness.agents[0].session.id
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/permission read-only', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /已切换本对话的权限模式/.test(entry.text)))
+    assert.deepEqual(presets.calls, [{ sessionId, name: 'read-only' }])
+    const reply = env.client.sent.map((entry) => entry.text).find((text) => /已切换本对话的权限模式/.test(text))
+    assert.match(reply, /read-only/)
+
+    // /status then reports the new mode.
+    await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 3 }))
+    await waitFor(() => env.client.sent.some((entry) => /状态：/.test(entry.text)))
+    const status = env.client.sent.map((entry) => entry.text).find((text) => /状态：/.test(text))
+    assert.match(status, /权限：read-only/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/permission refuses an unknown preset and a non-owner switch', async () => {
+  const presets = fakePermissionPresets()
+  const env = await setup({
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }, services: { permissionPresets: presets } },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    await env.bridge.handleInbound(inboundMessage({ text: '/permission yolo', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /没有这个权限模式/.test(entry.text)))
+    assert.equal(presets.calls.length, 0, 'an unknown preset must not reach the host')
+    assert.ok(!env.client.sent.some((entry) => /yolo/.test(entry.text) && /已切换/.test(entry.text)))
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('full access needs the explicit confirmation word', async () => {
+  const presets = fakePermissionPresets()
+  const env = await setup({
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }, services: { permissionPresets: presets } },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/permission danger-full-access', id: 2 }))
+    await waitFor(() => env.client.sent.some((entry) => /不再向你请求审批/.test(entry.text)))
+    assert.equal(presets.calls.length, 0, 'the bare name must only warn')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/permission danger-full-access confirm', id: 3 }))
+    await waitFor(() => env.client.sent.some((entry) => /已切换本对话的权限模式/.test(entry.text)))
+    assert.deepEqual(presets.calls.map((call) => call.name), ['danger-full-access'])
+  } finally {
+    await env.cleanup()
+  }
+})
