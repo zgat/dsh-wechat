@@ -11,7 +11,8 @@
  *   --via-gui   build the tarball and print the path to paste into the GUI plugin
  *               manager (the host performs its own reload; usually no restart)
  *   --via-cli   pack, install into the profile with `dsh plugin --profile <p> add`,
- *               then say plainly that DSH must restart before the new code runs
+ *               then schedule the restart that makes the new code run (default: 10s;
+ *               `--no-restart` opts out, `--restart-delay N` moves the deadline)
  *
  * Usage:
  *   node scripts/upgrade.mjs --via-gui
@@ -31,13 +32,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 /** Parse `--flag value` pairs and the mode switch. */
 function parseArgs(argv) {
-  const options = { mode: null, profile: 'desktop', stateDir: null, open: false }
+  const options = { mode: null, profile: 'desktop', stateDir: null, open: false, restart: true, restartDelay: 10 }
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
     if (token === '--via-gui') options.mode = 'gui'
     else if (token === '--via-cli') options.mode = 'cli'
     else if (token === '--check') options.mode = 'check'
     else if (token === '--open') options.open = true
+    else if (token === '--no-restart') options.restart = false
+    else if (token === '--restart-delay') options.restartDelay = Number(argv[++index])
     else if (token === '--profile') options.profile = argv[++index]
     else if (token === '--state-dir') options.stateDir = argv[++index]
     else throw new Error(`unknown argument: ${token}`)
@@ -141,9 +144,15 @@ try {
         await run(process.execPath, [pnpm, 'install'], { cwd: profileDir })
         console.log(`已通过内置 pnpm 安装到 ${profileDir}`)
       }
-      console.log('\n⚠️  CLI 安装不会触发宿主的重载：DSH 需要重启才会运行新代码。')
-      console.log('   想要不重启，请改用 --via-gui（宿主的插件管理器会自己重载）。')
-      console.log('   重启后可用 --check 确认运行中的版本。')
+      if (options.restart) {
+        const { scheduleRestart } = await import('./schedule-restart.mjs')
+        const scheduled = await scheduleRestart({ delaySeconds: options.restartDelay, force: true })
+        console.log(`\n已安排重启：${scheduled.delaySeconds} 秒后（launchd 一次性任务，执行后自清理）`)
+        console.log(`  日志：${scheduled.log}`)
+        console.log('  取消：node scripts/schedule-restart.mjs --cancel')
+      } else {
+        console.log('\n⚠️  已跳过自动重启（--no-restart）：新代码要等 DSH 重启后才生效。')
+      }
     }
   }
 } catch (error) {

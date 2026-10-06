@@ -98,7 +98,7 @@ iLink 网关 ──HTTP──> channel.js ──> bridge.js ──> agents/sessi
 # 1) 安装（二选一）
 #    a. GUI：设置 → 插件 → 安装，粘贴 tarball 路径（宿主自己热重载，通常无需重启）
 #    b. 终端：
-dsh plugin --profile desktop add ./dsh-wechat-0.1.27.tgz
+dsh plugin --profile desktop add ./dsh-wechat-0.1.28.tgz
 
 # 2) 扫码绑定（生成二维码 + 回环扫码页）
 node bin/dsh-wechat.mjs login --page

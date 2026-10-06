@@ -413,3 +413,26 @@ test('the version line distinguishes running from installed', () => {
   assert.match(describeVersion({ version: null, installedVersion: '0.1.24' }), /没有启动记录/)
   assert.match(describeVersion({ version: null, installedVersion: null }), /未知/)
 })
+
+test('the restart job is a one-shot LaunchAgent on internal paths only', async () => {
+  const { buildPlist, internalScriptPath, plistPath, xmlEscape } = await import('../scripts/schedule-restart.mjs')
+
+  const xml = buildPlist({ scriptPath: '/Users/x/Library/Application Support/dsh-wechat/restart-dsh.sh', delaySeconds: 10, force: true })
+  // One-shot semantics: launchd must not relaunch it (that produced a restart loop).
+  assert.match(xml, /<key>RunAtLoad<\/key><true\/>/)
+  assert.match(xml, /<key>KeepAlive<\/key><false\/>/)
+  assert.match(xml, /<string>com\.zgat\.dsh-wechat-restart<\/string>/)
+  assert.match(xml, /--delay 10/)
+  assert.match(xml, /DSH_RESTART_FORCE=1/)
+  // Shell metacharacters must be XML-escaped or launchd refuses the file.
+  assert.equal(xmlEscape('a && b > c'), 'a &amp;&amp; b &gt; c')
+  assert.match(xml, /2&gt;\/dev\/null/)
+  assert.ok(!/&(?!amp;|lt;|gt;)/.test(xml), 'no raw ampersands')
+  // Cleanup has to precede bootout: unloading kills the job's process tree.
+  assert.ok(xml.indexOf('rm -f') < xml.indexOf('bootout'), 'remove the plist before unloading')
+
+  // The helper is copied off the repository: launchd cannot read an external volume.
+  assert.ok(!internalScriptPath().startsWith('/Volumes/'), `helper must live on the internal disk: ${internalScriptPath()}`)
+  assert.ok(internalScriptPath().startsWith(os.homedir()), 'helper lives under HOME')
+  assert.match(plistPath(), /Library\/LaunchAgents\/com\.zgat\.dsh-wechat-restart\.plist$/)
+})

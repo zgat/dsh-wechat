@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "description": "把 DeepSeek Harness 接进微信：扫码绑定后在微信里派活、收结果、回审批（iLink/ClawBot 协议）",
   "keywords": [
     "dsh",
