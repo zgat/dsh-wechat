@@ -72,7 +72,7 @@
 
 **DSH STORE 状态**（2026-10-06 复检）：商店条目已同步到本仓库最新提交并确认 **DSH 兼容声明生效**（`0.2.0-rc.2: compatible`）；状态仍为 `blocked`，剩余原因**只有五类权限信号**（files / network / commands / credentials / nativeOrExecutableArtifacts）——如上所述，这是本插件固有能力，自动 `source-verified` 通道要求这些全为否，因此我们请求按 `user-reviewed` 如实呈现（见 [DSH-Store#1321](https://github.com/AI-Scarlett/DSH-Store/issues/1321) 的复核请求）。
 
-**一次性 Profile 证据**：安装 / 组合 / 卸载的可复现验证记录在 [docs/profile-verification.md](docs/profile-verification.md)（`scripts/verify-profile-install.sh`，全程在临时 `DSH_HOME` 中，不碰真实 profile）。
+**一次性 Profile 证据**：安装 / 组合 / **启动** / 卸载的可复现验证记录在 [docs/profile-verification.md](docs/profile-verification.md)（`scripts/verify-profile-install.sh` 与 `scripts/verify-profile-boot.sh`，全程在临时 `DSH_HOME` 与系统分配端口上，不碰真实 profile；启动验证不启用扫码登录，因此不产生网络流量）。
 
 **兼容性**：DSH `0.2.0-rc.2`（端到端实测；`0.2.0-rc.1` 与 `0.2.1-alpha.1` 未验证）、Node `>= 20`、profile `desktop` 实测（web/tui 等只要提供 `agents`/`sessions` 服务即可运行）、系统 macOS 实测 / Linux 与 Windows 路径已审计。
 
