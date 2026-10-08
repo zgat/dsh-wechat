@@ -2526,3 +2526,94 @@ test('a turn whose stream produced nothing still answers from the committed mess
     await env.cleanup()
   }
 })
+
+test('a long WeChat turn gets "still working" heartbeats, and they stop with the turn', async () => {
+  const env = await setup({
+    config: { progressHeartbeatSeconds: 1 },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ agent, emit, defer }) => {
+        defer()
+        emit('session/event', agent.session, { type: 'tool/call', data: { name: 'bash', arguments: '{"command":"sleep 300"}' } })
+        // Hold the turn open long enough for two heartbeats, then finish it the way
+        // the real driver does (streamed text + the matching `turn/end`).
+        setTimeout(() => agent.completeDeferredTurn('跑完了'), 2_400)
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '跑个长任务' }))
+    await waitFor(() => env.client.sent.some((entry) => /仍在处理中/.test(entry.text)), { timeoutMs: 3_000, label: 'first heartbeat' })
+    const beats = env.client.sent.filter((entry) => /仍在处理中/.test(entry.text))
+    assert.ok(beats.length >= 1, 'at least one heartbeat')
+    assert.match(beats[0].text, /🔄 仍在处理中…（已 \d+ 秒｜最后一步：bash）/)
+
+    await waitFor(() => env.client.sent.some((entry) => /跑完了/.test(entry.text)), { timeoutMs: 5_000, label: 'the answer' })
+    const before = env.client.sent.filter((entry) => /仍在处理中/.test(entry.text)).length
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    const after = env.client.sent.filter((entry) => /仍在处理中/.test(entry.text)).length
+    assert.equal(after, before, 'heartbeats stop once the turn ends')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('heartbeats are opt-out and never fire for turns from other clients', async () => {
+  const off = await setup({
+    config: { progressHeartbeatSeconds: 0 },
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) } },
+  })
+  try {
+    await off.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => off.client.sent.length > 0)
+    await new Promise((resolve) => setTimeout(resolve, 1_200))
+    assert.ok(!off.client.sent.some((entry) => /仍在处理中/.test(entry.text)), '0 disables heartbeats')
+  } finally {
+    await off.cleanup()
+  }
+
+  // Tool-progress off means the heartbeat stays generic: the name comes from the same
+  // switch, so a person who muted tool lines is not told tool names by the back door.
+  const quiet = await setup({
+    config: { progressHeartbeatSeconds: 1, showToolProgress: false },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ agent, emit, defer }) => {
+        defer()
+        emit('session/event', agent.session, { type: 'tool/call', data: { name: 'bash', arguments: '{}' } })
+        setTimeout(() => agent.completeDeferredTurn('好了'), 2_000)
+      },
+    },
+  })
+  try {
+    await quiet.bridge.handleInbound(inboundMessage({ text: '静默长任务' }))
+    await waitFor(() => quiet.client.sent.some((entry) => /仍在处理中/.test(entry.text)), { timeoutMs: 3_000, label: 'quiet heartbeat' })
+    const beat = quiet.client.sent.find((entry) => /仍在处理中/.test(entry.text))
+    assert.ok(!/最后一步/.test(beat.text), `no tool name when tool progress is off: ${beat.text}`)
+    assert.ok(!quiet.client.sent.some((entry) => /🔧/.test(entry.text)), 'no tool lines either')
+  } finally {
+    await quiet.cleanup()
+  }
+
+  const on = await setup({
+    config: { progressHeartbeatSeconds: 1 },
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) } },
+  })
+  try {
+    await on.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => on.harness.agents.length === 1)
+    const session = on.harness.agents[0].session
+    await on.bridge.handleInbound(inboundMessage({ text: '/listen', id: 2 }))
+    await waitFor(() => on.bridge.isFollowing('p2p:user@im.wechat'))
+    const before = on.client.sent.length
+
+    // A foreign turn in a followed session: /listen reports its result once, but it
+    // must not produce heartbeats — the chat is not waiting on it.
+    on.bridge.onSessionEvent(session, { type: 'turn/start', data: { turn: 91 } })
+    await new Promise((resolve) => setTimeout(resolve, 1_300))
+    const beats = on.client.sent.slice(before).filter((entry) => /仍在处理中/.test(entry.text))
+    assert.equal(beats.length, 0, 'no heartbeat for a turn nobody in WeChat started')
+  } finally {
+    await on.cleanup()
+  }
+})
