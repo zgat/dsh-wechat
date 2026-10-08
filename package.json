@@ -11,7 +11,9 @@
     "wechat",
     "wechat-bot",
     "ilink",
-    "clawbot"
+    "clawbot",
+    "notifications",
+    "sessions"
   ],
   "license": "MIT",
   "type": "module",
@@ -38,6 +40,7 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
+    "pluginType": "feature",
     "compatibility": {
       "dsh": ">=0.2.0-rc.2 <0.3.0",
       "dshReleases": {
