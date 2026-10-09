@@ -9,6 +9,14 @@
 
 **GitHub 话题**：[`dsh-plugin`](https://github.com/topics/dsh-plugin)（DSH 插件生态索引抓取的话题）、[`deepseek-harness`](https://github.com/topics/deepseek-harness)。
 
+**安装（不需要插件商店）**：从 [Releases](https://github.com/zgat/dsh-wechat/releases) 下载 `dsh-wechat-<版本>.tgz`，然后
+
+```sh
+dsh plugin --profile desktop add ./dsh-wechat-<版本>.tgz   # 或 GUI：设置 → 插件 → 安装，粘贴该 tgz 路径
+```
+
+升级同理，装完默认 10 秒后自动重启生效；完整步骤（扫码登录、配置覆盖、自检）见 [快速开始](#快速开始) 与 [§2 安装](#2-安装)。
+
 ## 特色（与同类插件相比）
 
 - 🔐 **能在微信里改权限**：`/permission` 按**会话**切换 `read-only` / `workspace-write` / `danger-full-access`（写进会话记录、重启仍生效；放宽到完全权限需二次确认，且仅所有者可改）。同类插件大多只能逐次审批，无法切换权限模式。
