@@ -27,7 +27,7 @@ WEB_PORT="${DSH_WEB_PORT:-19387}"
 PLUGIN_PORT="${DSH_PLUGIN_PORT:-30989}"
 STATE_DIR="${DSH_WECHAT_STATE_DIR:-$HOME/.dsh/integrations/dsh-wechat}"
 PROFILE_DIR="${DSH_PROFILE_DIR:-$HOME/.dsh/profiles/desktop}"
-LOG_FILE="${TMPDIR:-/tmp}/dsh-restart.log"
+LOG_FILE="${DSH_RESTART_LOG:-${TMPDIR:-/tmp}/dsh-restart.log}"
 PID_FILE="${TMPDIR:-/tmp}/dsh-restart.pid"
 
 DELAY=0

@@ -21,7 +21,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { chmod, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -51,7 +51,7 @@ export function buildPlist(options) {
   // The force flag is an *assignment prefix* on the same command: written as a
   // separate statement it would not reach the script's environment, and the script's
   // re-entry guard would silently skip the restart.
-  const invocation = `${options.force ? 'DSH_RESTART_FORCE=1 ' : ''}"${options.scriptPath}" --delay ${options.delaySeconds}`
+  const invocation = `DSH_RESTART_LOG="${logFile}" ${options.force ? 'DSH_RESTART_FORCE=1 ' : ''}"${options.scriptPath}" --delay ${options.delaySeconds}`
   const command = [
     invocation,
     // Cleanup before bootout: unloading kills this job's process tree, so anything
@@ -70,12 +70,33 @@ export function buildPlist(options) {
   <key>Label</key><string>${xmlEscape(label)}</string>
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>-lc</string><string>${xmlEscape(command)}</string></array>
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>${xmlEscape(os.homedir())}</string><key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>StandardOutPath</key><string>${xmlEscape(logFile.replace('$HOME', os.homedir()))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(logFile.replace('$HOME', os.homedir()))}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
 </dict>
 </plist>
 `
+}
+
+/**
+ * Count how many restarts were scheduled inside a recent window.
+ * @param {string} log - restart log path.
+ * @param {number} windowMs - how far back to look.
+ * @returns {Promise<number>} number of `scheduled:` lines inside the window.
+ */
+async function recentScheduleCount(log, windowMs) {
+  const text = await readFile(log, 'utf8').catch(() => '')
+  const cutoff = Date.now() - windowMs
+  let count = 0
+  for (const line of text.split('\n')) {
+    const match = /^(\S+) scheduled:/.exec(line)
+    if (!match) continue
+    const at = Date.parse(match[1])
+    if (Number.isFinite(at) && at >= cutoff) count += 1
+  }
+  return count
 }
 
 /** Where the restart helper is copied so launchd can read it. */
@@ -86,6 +107,24 @@ export function internalScriptPath() {
 /** Where the LaunchAgent lives. */
 export function plistPath(label = LABEL) {
   return path.join(os.homedir(), 'Library/LaunchAgents', `${label}.plist`)
+}
+
+/**
+ * Whether a restart job with this label is currently loaded.
+ *
+ * Scheduling twice used to stack two independent one-shot jobs (each with its own
+ * `DSH_RESTART_FORCE=1`, so the script's re-entry guard never saw them): two installs in
+ * a row meant two restarts minutes apart. Callers now replace instead of stacking.
+ * @param {string} [label] - LaunchAgent label.
+ * @returns {Promise<boolean>} true when the job is loaded.
+ */
+export async function isRestartPending(label = LABEL) {
+  try {
+    await run('launchctl', ['print', `gui/${process.getuid?.() ?? 501}/${label}`])
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Remove any pending restart job. */
@@ -113,10 +152,22 @@ export async function scheduleRestart(options = {}) {
   await copyFile(path.join(root, 'scripts/restart-dsh.sh'), scriptTarget)
   await chmod(scriptTarget, 0o755)
 
+  // Burst guard: two restarts minutes apart is what a person experiences as "my DSH
+  // keeps restarting". Refuse a third within the window unless the caller insists.
+  if (!options.allowBurst) {
+    const recent = await recentScheduleCount(log, 10 * 60 * 1000)
+    if (recent >= 2) {
+      return { scheduled: false, reason: 'burst-guard', recent, delaySeconds, plist, script: scriptTarget, log }
+    }
+  }
+  const replaced = await isRestartPending()
   await cancelRestart()
   await writeFile(plist, buildPlist({ scriptPath: scriptTarget, delaySeconds, force: options.force, logFile: log }))
+  // Leave a trace: a scheduled restart that logs nothing is indistinguishable from one
+  // that never ran (that is exactly how a missing log line misled a diagnosis).
+  await appendFile(log, `${new Date().toISOString()} scheduled: restarting DSH in ${delaySeconds}s${replaced ? ' (replaced a pending job)' : ''}\n`).catch(() => {})
   await run('launchctl', ['bootstrap', `gui/${process.getuid?.() ?? 501}`, plist])
-  return { scheduled: true, delaySeconds, plist, script: scriptTarget, log }
+  return { scheduled: true, delaySeconds, plist, script: scriptTarget, log, replaced }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

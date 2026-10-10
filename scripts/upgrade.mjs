@@ -144,12 +144,39 @@ try {
         await run(process.execPath, [pnpm, 'install'], { cwd: profileDir })
         console.log(`已通过内置 pnpm 安装到 ${profileDir}`)
       }
+      const { verifyInstalled, installFresh } = await import('./upgrade-install.mjs')
+      const stale = await verifyInstalled({ profileDir, tarball, run })
+      if (stale) {
+        console.log('\n⚠️  已装内容与 tarball 不一致（pnpm 对同版本 file: 依赖会判定“已安装”而沿用旧副本）。')
+        console.log('   正在强制重装…')
+        await installFresh({ profileDir, tarball, run })
+        const stillStale = await verifyInstalled({ profileDir, tarball, run })
+        if (stillStale) {
+          console.error('   ❌ 仍不一致：请把版本号 +1 后重试（同版本号 + 同名 tarball 是 pnpm 的固有行为）。')
+          process.exitCode = 1
+        } else {
+          console.log('   ✅ 重装后一致')
+        }
+      }
+
       if (options.restart) {
-        const { scheduleRestart } = await import('./schedule-restart.mjs')
-        const scheduled = await scheduleRestart({ delaySeconds: options.restartDelay, force: true })
-        console.log(`\n已安排重启：${scheduled.delaySeconds} 秒后（launchd 一次性任务，执行后自清理）`)
-        console.log(`  日志：${scheduled.log}`)
-        console.log('  取消：node scripts/schedule-restart.mjs --cancel')
+        const { scheduleRestart, isRestartPending } = await import('./schedule-restart.mjs')
+        if (await isRestartPending()) {
+          const pending = await scheduleRestart({ delaySeconds: options.restartDelay, force: true })
+          console.log(`\n已有排程：已替换为 ${pending.delaySeconds} 秒后（不会叠加成多次重启）`)
+          console.log(`  日志：${pending.log}`)
+        } else {
+          const scheduled = await scheduleRestart({ delaySeconds: options.restartDelay, force: true })
+          if (!scheduled.scheduled) {
+            console.log(`\n⚠️  已跳过自动重启：${scheduled.recent} 次重启刚排过（熔断，避免“一直重启”的观感）。`)
+            console.log('   需要现在重启就手动执行：./scripts/restart-dsh.sh --delay 10')
+            console.log(`   日志：${scheduled.log}`)
+          } else {
+            console.log(`\n已安排重启：${scheduled.delaySeconds} 秒后（launchd 一次性任务，执行后自清理）`)
+            console.log(`  日志：${scheduled.log}`)
+            console.log('  取消：node scripts/schedule-restart.mjs --cancel')
+          }
+        }
       } else {
         console.log('\n⚠️  已跳过自动重启（--no-restart）：新代码要等 DSH 重启后才生效。')
       }

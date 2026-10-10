@@ -447,3 +447,56 @@ test('messageText reads both committed shapes', () => {
   assert.equal(messageText({ content: 'plain' }), 'plain')
   assert.equal(messageText(undefined), '')
 })
+
+test('verifyInstalled spots a tarball rebuilt under the same version', async () => {
+  // pnpm treats a file: dependency whose version is unchanged as already installed, so
+  // an upgrade can silently keep the old files. The fingerprint is what catches it.
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { verifyInstalled } = await import('../scripts/upgrade-install.mjs')
+  const exec = promisify(execFile)
+  const run = async (cmd, args, options) => {
+    const { stdout } = await exec(cmd, args, options)
+    return { stdout }
+  }
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-wechat-fingerprint-'))
+  try {
+    const pkg = path.join(root, 'pkg', 'package')
+    await mkdir(path.join(pkg, 'lib'), { recursive: true })
+    await writeFile(path.join(pkg, 'package.json'), '{"name":"dsh-wechat","version":"1.0.0"}\n')
+    await writeFile(path.join(pkg, 'lib/bridge.js'), 'export const value = 1\n')
+    await writeFile(path.join(pkg, 'lib/approval.js'), 'export const value = 1\n')
+    await writeFile(path.join(pkg, 'lib/index.js'), 'export const value = 1\n')
+    const tarball = path.join(root, 'dsh-wechat-1.0.0.tgz')
+    await exec('tar', ['-czf', tarball, '-C', path.join(root, 'pkg'), 'package'])
+
+    const profileDir = path.join(root, 'profile')
+    const installed = path.join(profileDir, 'node_modules/dsh-wechat')
+    await mkdir(path.join(installed, 'lib'), { recursive: true })
+    for (const relative of ['package.json', 'lib/bridge.js', 'lib/approval.js', 'lib/index.js']) {
+      await writeFile(path.join(installed, relative), await (await import('node:fs/promises')).readFile(path.join(pkg, relative)))
+    }
+    assert.equal(await verifyInstalled({ profileDir, tarball, run }), false, 'identical copy is not stale')
+
+    await writeFile(path.join(installed, 'lib/bridge.js'), 'export const value = 2\n')
+    assert.equal(await verifyInstalled({ profileDir, tarball, run }), true, 'changed file is stale')
+
+    await rm(installed, { recursive: true, force: true })
+    assert.equal(await verifyInstalled({ profileDir, tarball, run }), true, 'missing install is stale')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the restart job writes one log and is scheduled through a single label', async () => {
+  const { buildPlist, plistPath } = await import('../scripts/schedule-restart.mjs')
+  const plist = buildPlist({ scriptPath: '/tmp/restart-dsh.sh', delaySeconds: 10, force: true })
+  assert.match(plist, /StandardOutPath/, 'stdout goes to a file')
+  assert.match(plist, /StandardErrorPath/, 'stderr goes to a file')
+  assert.match(plist, /DSH_RESTART_LOG="\$HOME\/dsh-wechat-restart.log"/, 'the script logs where the job logs')
+  assert.match(plist, /DSH_RESTART_FORCE=1 "\/tmp\/restart-dsh.sh" --delay 10/, 'force stays an assignment prefix')
+  assert.match(plist, /<key>KeepAlive<\/key><false\/>/, 'one-shot: never respawn')
+  assert.ok(plistPath().endsWith('com.zgat.dsh-wechat-restart.plist'))
+})
