@@ -45,7 +45,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE" >&2; }
+log() {
+  # When launchd runs this script it already redirects stdout *and* stderr into
+  # DSH_RESTART_LOG, so `tee` would write every line twice. Manual runs keep the tee.
+  if [ -n "${DSH_RESTART_LOG:-}" ]; then
+    printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >&2
+  else
+    printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE" >&2
+  fi
+}
 
 # --- discovery -------------------------------------------------------------
 
