@@ -521,3 +521,47 @@ test('upgrading does not restart DSH unless asked', async () => {
   assert.throws(() => parseArgs(['--via-cli', '--nope']), /unknown argument/)
   assert.throws(() => parseArgs([]), /pass --via-gui/)
 })
+
+test('numeric config fields reject values that only look numeric', () => {
+  // `Number([])` is 0 and `Number(true)` is 1: coercing those turned a typo into a
+  // silently different behaviour (a disabled cap, a one-character answer).
+  assert.throws(() => normalizeConfig({ maxAnswerChars: [] }), /must be a number/)
+  assert.throws(() => normalizeConfig({ maxAnswerChars: true }), /must be a number/)
+  assert.throws(() => normalizeConfig({ chunkChars: [1800] }), /must be a number/)
+  assert.throws(() => normalizeConfig({ sendRetryMs: [Number.NaN] }), /finite/)
+  assert.throws(() => normalizeConfig({ sendRetryMs: [Number.POSITIVE_INFINITY] }), /finite/)
+  assert.equal(normalizeConfig({ maxAnswerChars: '0' }).maxAnswerChars, 0, 'numeric strings still work')
+})
+
+test('withRetries survives a nonsensical attempt count', async () => {
+  const { withRetries } = await import('../lib/retry.js')
+  let calls = 0
+  const result = await withRetries(async () => {
+    calls += 1
+    return 'ok'
+  }, { attempts: Number.NaN })
+  assert.equal(result, 'ok')
+  assert.equal(calls, 1, 'NaN attempts falls back to the default policy instead of skipping the loop')
+})
+
+test('/status shows how long ago the last error happened', async () => {
+  const { createCommands } = await import('../lib/commands.js')
+  const commands = createCommands({
+    describeConversation: async () => ({
+      connected: true,
+      sessionId: 's1',
+      workspace: '/tmp',
+      model: 'm',
+      agentPreset: 'standard',
+      permission: 'workspace-write',
+      following: false,
+      version: '0.1.35',
+      installedVersion: '0.1.35',
+      runningTurns: 0,
+      pendingInteractions: 0,
+      stats: { inbound: 1, outbound: 2, lastError: { at: new Date(Date.now() - 3 * 3600_000).toISOString(), message: 'ret=-2' } },
+    }),
+  })
+  const text = await commands.status([], { conversationKey: 'p2p:u', isOwner: true })
+  assert.match(text, /最近错误（3 小时前）：ret=-2/)
+})

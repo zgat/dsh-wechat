@@ -2751,8 +2751,10 @@ test('with /listen on, a GUI turn\'s interaction is offered to both sides and th
 
     // 1) WeChat answers first: the request resolves and the other client is dismissed.
     const controller = new AbortController()
-    // The plugin cannot abort a signal the host owns; it can only tell whoever listens
-    // that the card is void. Assert the notification, not `signal.aborted`.
+    // The plugin must NOT touch request.signal: the host's own decide() races the
+    // waterfall against that signal, so a synthetic abort settles the request as
+    // "cancelled" before our answer lands (every WeChat approval would become a denial).
+    // The other client's dialog therefore stays open until clicked.
     let dismissNotified = false
     controller.signal.addEventListener('abort', () => {
       dismissNotified = true
@@ -2773,7 +2775,7 @@ test('with /listen on, a GUI turn\'s interaction is offered to both sides and th
     assert.equal(guiCalls, 1, 'the GUI dialog is still offered')
     await env.bridge.handleInbound(inboundMessage({ text: '允许', id: 3 }))
     assert.equal(await pending, 'allowed-once')
-    assert.equal(dismissNotified, true, 'the other client is told to dismiss its dialog')
+    assert.equal(dismissNotified, false, 'the request signal is left untouched')
     assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), false, 'our slot is released')
     guiResolve('cancelled')
 
@@ -3026,6 +3028,59 @@ test('a real decision from the other client voids the WeChat approval card', asy
       label: 'void notice',
     })
     assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), false, 'the chat slot was released')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a queued message never adopts the turn another client was already running', async () => {
+  // Regression: a queued message keeps a placeholder with turn=null, and `turn/end` fell
+  // back to "any unstarted message" — so a turn that was *already running* when the
+  // message arrived delivered its answer into the chat, and the message's own answer was
+  // dropped when the placeholder got consumed.
+  let jobs = 0
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ agent, defer }) => {
+        jobs += 1
+        if (jobs === 1) {
+          // First message binds the conversation and finishes its turn completely.
+          defer()
+          agent.completeDeferredTurn('绑定完成')
+        }
+        // Later messages stay queued: no turn/start is emitted for them.
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '先绑定' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const session = env.harness.agents[0].session
+    await waitFor(() => env.client.sent.some((entry) => /绑定完成/.test(entry.text)))
+
+    // Another client's turn is running *before* the WeChat message arrives.
+    env.bridge.onSessionEvent(session, { type: 'turn/start', data: { turn: 7 } })
+    await env.bridge.handleInbound(inboundMessage({ text: '排队等我', id: 2 }))
+    const before = env.client.sent.length
+
+    env.bridge.onSessionEvent(session, {
+      type: 'assistant/message',
+      data: { turn: 7, message: { role: 'assistant', content: [{ type: 'text', text: '别人那轮的答案' }] } },
+    })
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(env.client.sent.length, before, 'the other client\'s turn was not delivered here')
+    assert.ok(!env.client.sent.some((entry) => /别人那轮的答案/.test(entry.text)))
+
+    // Our own turn — a different number — still lands.
+    env.bridge.onSessionEvent(session, { type: 'turn/start', data: { turn: 8 } })
+    env.bridge.onSessionEvent(session, {
+      type: 'assistant/message',
+      data: { turn: 8, message: { role: 'assistant', content: [{ type: 'text', text: '我的答案' }] } },
+    })
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 8, reason: { kind: 'completed' } } })
+    await waitFor(() => env.client.sent.some((entry) => /我的答案/.test(entry.text)), { label: 'my own answer' })
   } finally {
     await env.cleanup()
   }
