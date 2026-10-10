@@ -500,3 +500,24 @@ test('the restart job writes one log and is scheduled through a single label', a
   assert.match(plist, /<key>KeepAlive<\/key><false\/>/, 'one-shot: never respawn')
   assert.ok(plistPath().endsWith('com.zgat.dsh-wechat-restart.plist'))
 })
+
+test('upgrading does not restart DSH unless asked', async () => {
+  // The install used to schedule a restart by default; two installs in a row then meant
+  // two restarts minutes apart. Restarting is now an explicit choice.
+  const { parseArgs } = await import('../scripts/upgrade-args.mjs')
+  const plain = parseArgs(['--via-cli'])
+  assert.equal(plain.restart, false, 'installing alone never restarts')
+  assert.equal(plain.restartDelay, 10)
+
+  assert.equal(parseArgs(['--via-cli', '--restart']).restart, true, '--restart opts in')
+  assert.equal(parseArgs(['--via-cli', '--no-restart']).restart, false, '--no-restart states the default')
+  const delayed = parseArgs(['--via-cli', '--restart-delay', '30'])
+  assert.equal(delayed.restart, true, 'a deadline implies the restart')
+  assert.equal(delayed.restartDelay, 30)
+  assert.equal(parseArgs(['--via-cli', '--restart', '--no-restart']).restart, false, 'the last flag wins')
+
+  assert.equal(parseArgs(['--check']).mode, 'check')
+  assert.equal(parseArgs(['--via-gui', '--open', '--profile', 'web']).profile, 'web')
+  assert.throws(() => parseArgs(['--via-cli', '--nope']), /unknown argument/)
+  assert.throws(() => parseArgs([]), /pass --via-gui/)
+})

@@ -10,9 +10,11 @@
  * Two channels, matching those mechanics:
  *   --via-gui   build the tarball and print the path to paste into the GUI plugin
  *               manager (the host performs its own reload; usually no restart)
- *   --via-cli   pack, install into the profile with `dsh plugin --profile <p> add`,
- *               then schedule the restart that makes the new code run (default: 10s;
- *               `--no-restart` opts out, `--restart-delay N` moves the deadline)
+ *   --via-cli   pack and install into the profile with `dsh plugin --profile <p> add`.
+ *               It does **not** restart DSH by default: the new code takes effect on the
+ *               next restart, and the caller decides when that happens. `--restart`
+ *               schedules one (default 10s; `--restart-delay N` moves the deadline) and
+ *               `--no-restart` states the default explicitly.
  *
  * Usage:
  *   node scripts/upgrade.mjs --via-gui
@@ -23,6 +25,7 @@
 import { execFile } from 'node:child_process'
 import { readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
+import { parseArgs } from './upgrade-args.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -30,24 +33,6 @@ import { promisify } from 'node:util'
 const run = promisify(execFile)
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-/** Parse `--flag value` pairs and the mode switch. */
-function parseArgs(argv) {
-  const options = { mode: null, profile: 'desktop', stateDir: null, open: false, restart: true, restartDelay: 10 }
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index]
-    if (token === '--via-gui') options.mode = 'gui'
-    else if (token === '--via-cli') options.mode = 'cli'
-    else if (token === '--check') options.mode = 'check'
-    else if (token === '--open') options.open = true
-    else if (token === '--no-restart') options.restart = false
-    else if (token === '--restart-delay') options.restartDelay = Number(argv[++index])
-    else if (token === '--profile') options.profile = argv[++index]
-    else if (token === '--state-dir') options.stateDir = argv[++index]
-    else throw new Error(`unknown argument: ${token}`)
-  }
-  if (options.mode === null) throw new Error('pass --via-gui, --via-cli or --check')
-  return options
-}
 
 /** Read the version this working tree builds. */
 async function workspaceVersion() {
@@ -178,7 +163,9 @@ try {
           }
         }
       } else {
-        console.log('\n⚠️  已跳过自动重启（--no-restart）：新代码要等 DSH 重启后才生效。')
+        console.log('\nℹ️  未重启：新代码要等 DSH 重启后才生效（自动重启已改为显式 opt-in）。')
+        console.log('   现在重启：./scripts/restart-dsh.sh --delay 10')
+        console.log('   下次让它自动重启：node scripts/upgrade.mjs --via-cli --restart [--restart-delay N]')
       }
     }
   }

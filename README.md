@@ -15,7 +15,7 @@
 dsh plugin --profile desktop add ./dsh-wechat-<版本>.tgz   # 或 GUI：设置 → 插件 → 安装，粘贴该 tgz 路径
 ```
 
-升级同理，装完默认 10 秒后自动重启生效；完整步骤（扫码登录、配置覆盖、自检）见 [快速开始](#快速开始) 与 [§2 安装](#2-安装)。
+升级同理。**装完不会自动重启**——新代码要等 DSH 下次重启才生效，重启时机由你决定（`./scripts/restart-dsh.sh --delay 10`，或 `node scripts/upgrade.mjs --via-cli --restart` 显式要一次自动重启）；完整步骤见 [快速开始](#快速开始) 与 [§2 安装](#2-安装)。
 
 ## 特色（与同类插件相比）
 
@@ -26,7 +26,7 @@ dsh plugin --profile desktop add ./dsh-wechat-<版本>.tgz   # 或 GUI：设置 
 - 🧰 **Agent 自带"手"**：自动挂载部署默认 agent preset（`standard`：`tool-bash`、`tool-fs`、`tool-fs-search`、`plan-mode`…），微信里的 Agent 和 GUI 一样能跑命令、改文件。
 - 🗂 **对话名字与 GUI 一致**：`/session` 显示的就是 DSH 界面里的标题（会话日志的 `session/title`），标注「←当前 / 运行中」，子会话与已归档对话不打扰。
 - 🧪 **工程可信**：**177 条测试**（单元 + 假 iLink 网关端到端 + 真实 cordis 启动 + CLI 端到端 + 副作用预算），**零运行时依赖、无原生构建**；仓库自带[一次性 profile 的安装/启动/卸载证据](docs/profile-verification.md)与[副作用清单](docs/side-effects.md)。
-- 🔁 **升级与版本可自证**：`/status` 同时给出**运行中的版本**与**磁盘已装版本**（不一致会提示重启），每次启动写 `boots` 记录；`scripts/upgrade.mjs` 装完**默认 10 秒后自动重启**让新代码生效。
+- 🔁 **升级与版本可自证**：`/status` 同时给出**运行中的版本**与**磁盘已装版本**（不一致会提示重启），每次启动写 `boots` 记录；`scripts/upgrade.mjs` 装完**默认不重启**，要自动重启需显式 `--restart`（并带防叠加与连续重启熔断）。
 - 🔏 **安全默认**：白名单 + 所有者模型（非所有者不能改权限、不能清凭据）；凭据/状态/附件 `0600`、目录 `0700`；日志与工具参数双重脱敏；发送边界校验；只监听回环的扫码页（可关）。
 
 ## 这是什么
@@ -250,7 +250,7 @@ dsh plugin --profile desktop add ./dsh-wechat-*.tgz
 # 打包 + 走 GUI 插件管理器（宿主自己重载，通常无需重启）
 node scripts/upgrade.mjs --via-gui
 
-# 打包 + dsh plugin 安装，并**默认在 10 秒后自动重启**（--restart-delay N / --no-restart）
+# 打包 + dsh plugin 安装（默认不重启；要自动重启就加 --restart，或用 --restart-delay N）
 node scripts/upgrade.mjs --via-cli
 
 # 反悔：取消已排程的重启
