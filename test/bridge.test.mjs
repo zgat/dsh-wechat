@@ -23,6 +23,7 @@ async function setup(options = {}) {
     send: (key, text) => bridge.deliver(key, text),
     conversationOf: (sessionId) => bridge.conversationForSession(sessionId),
     ownsInteraction: (sessionId) => bridge.isDrivingTurn(sessionId),
+    watchesInteraction: (sessionId) => bridge.watchesInteraction(sessionId),
   })
   const bridge = new WechatBridge({
     ctx: harness.ctx,
@@ -2733,53 +2734,70 @@ test('a sub-agent question is claimed only while a WeChat turn owns the tree', a
   }
 })
 
-test('with /listen on, a GUI turn still keeps its own question and approval', async () => {
-  // Following (/listen) decides whether *finished* turns are echoed to the chat. It must
-  // not touch interaction ownership: a question raised by a GUI turn has to stay in the
-  // GUI even while the chat is following that session.
+test('with /listen on, a GUI turn\'s interaction is offered to both sides and the first answer wins', async () => {
+  // Following means "I am watching this conversation from my phone": the chat gets the
+  // card *and* the client that started the turn keeps its own dialog. Whichever answers
+  // first decides; the other side is told the card is void.
   const env = await setup({ config: { approvalTimeoutSeconds: 30, questionsTimeoutSeconds: 30 } })
   try {
     await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
     await waitFor(() => env.harness.agents.length === 1)
-    const session = env.harness.agents[0].session
+    const agent = env.harness.agents[0]
+    const session = agent.session
 
     await env.bridge.handleInbound(inboundMessage({ text: '/listen', id: 2 }))
     await waitFor(() => env.bridge.isFollowing('p2p:user@im.wechat'))
-    assert.equal(env.bridge.isDrivingTurn(session.id), false, 'following is not driving')
+    assert.equal(env.bridge.watchesInteraction(session.id), true, 'the chat follows this session')
 
-    let delegated = 0
-    const answered = await env.interactions.handleQuestions(
-      { agent: env.harness.agents[0], signal: new AbortController().signal, questions: [{ question: '选哪个？', options: ['A', 'B'] }] },
+    // 1) WeChat answers first: the request resolves and the other client is dismissed.
+    const controller = new AbortController()
+    // The plugin cannot abort a signal the host owns; it can only tell whoever listens
+    // that the card is void. Assert the notification, not `signal.aborted`.
+    let dismissNotified = false
+    controller.signal.addEventListener('abort', () => {
+      dismissNotified = true
+    })
+    let guiCalls = 0
+    let guiResolve
+    const gui = new Promise((resolve) => {
+      guiResolve = resolve
+    })
+    const pending = env.interactions.handleApproval(
+      { agent, toolName: 'bash', signal: controller.signal },
       async () => {
-        delegated += 1
-        return 'gui-answer'
+        guiCalls += 1
+        return gui
       },
     )
-    assert.equal(answered, 'gui-answer', 'the GUI answers its own turn')
-    assert.equal(delegated, 1)
-    assert.ok(!env.client.sent.some((entry) => /需要你的回答/.test(entry.text)), 'no question card in WeChat')
+    await waitFor(() => env.client.sent.some((entry) => /需要你确认/.test(entry.text)), { label: 'approval card' })
+    assert.equal(guiCalls, 1, 'the GUI dialog is still offered')
+    await env.bridge.handleInbound(inboundMessage({ text: '允许', id: 3 }))
+    assert.equal(await pending, 'allowed-once')
+    assert.equal(dismissNotified, true, 'the other client is told to dismiss its dialog')
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), false, 'our slot is released')
+    guiResolve('cancelled')
 
-    const approval = await env.interactions.handleApproval(
-      { agent: env.harness.agents[0], toolName: 'bash', signal: new AbortController().signal },
-      async () => {
-        delegated += 1
-        return 'gui-decision'
-      },
+    // 2) The other client answers first: WeChat's card is withdrawn with a notice.
+    const before = env.client.sent.length
+    const answeredElsewhere = env.interactions.handleQuestions(
+      { agent, signal: new AbortController().signal, questions: [{ question: '选哪个？', options: ['A', 'B'] }] },
+      async () => ({ answers: [{ id: 'q1', custom: 'GUI 已答' }] }),
     )
-    assert.equal(approval, 'gui-decision')
-    assert.equal(delegated, 2)
-    assert.ok(!env.client.sent.some((entry) => /需要你确认/.test(entry.text)), 'no approval card either')
+    const result = await answeredElsewhere
+    assert.match(JSON.stringify(result), /GUI 已答/)
+    await waitFor(() => env.client.sent.slice(before).some((entry) => /已在原来的客户端上回答/.test(entry.text)), {
+      label: 'void notice',
+    })
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), false)
 
-    // What following *does* deliver: the finished turn's text, marked as coming from
-    // another client. It arrives after the GUI turn ends, never as a question.
+    // 3) Following also delivers the finished turn's text, marked as another client's.
     env.bridge.onSessionEvent(session, {
       type: 'assistant/message',
       data: { turn: 5, message: { role: 'assistant', content: [{ type: 'text', text: 'GUI 的结果' }] } },
     })
     env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
     await waitFor(() => env.client.sent.some((entry) => /GUI 的结果/.test(entry.text)), { label: 'followed result' })
-    const followed = env.client.sent.find((entry) => /GUI 的结果/.test(entry.text))
-    assert.match(followed.text, /📥 其他客户端/)
+    assert.match(env.client.sent.find((entry) => /GUI 的结果/.test(entry.text)).text, /📥 其他客户端/)
   } finally {
     await env.cleanup()
   }
