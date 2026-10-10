@@ -34,7 +34,7 @@ login-page.url     0600   扫码页地址（含一次性令牌）
 login-qrcode.svg   0600   登录二维码
 login-qrcode.txt   0600   同上（字符画）
 state.json.<pid>.<ts>.tmp  写入中间态，随写随改名
-state.json.corrupt-<ts>    损坏状态文件的留档
+state.json.corrupt-<ts> / state.json.unreadable-<ts>   损坏或读不出的状态文件留档（/logout 会清掉凭据的同类副本）
 media/<日期>/<时间>-<名>   0600，入站附件解密后的落盘位置
 ```
 
@@ -56,7 +56,8 @@ media/<日期>/<时间>-<名>   0600，入站附件解密后的落盘位置
 | 回合超时（`turnTimeoutSeconds`） | 队首回合 | 是 |
 | 空闲回收（`idleDisposeMinutes`） | 插件加载期 | 是，卸载清除 |
 | 审批 / 提问等待 | 单次交互 | 是，卸载时 `dispose()` 统一结算 |
-| 长轮询退避、登录重试 | 单次等待，可被 abort 提前唤醒 | 是 |
+| 长轮询退避 | 单次等待，可被 abort 提前唤醒 | 是（宿主进程内） |
+| 扫码状态重试 | 同上；CLI 场景传 keepAlive 以免重试期间进程退出 | 否（CLI） |
 
 断言：出现 `setInterval` 的文件必须有等量 `unref`。
 

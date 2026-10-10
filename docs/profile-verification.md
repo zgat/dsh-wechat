@@ -5,7 +5,7 @@ DSH STORE 在把插件标为可安装前要求「一次性 Profile 的安装、�
 ## 复现方式
 
 ```sh
-npm pack                                     # 产出 dsh-wechat-0.1.28.tgz
+npm pack                                     # 产出 dsh-wechat-0.1.35.tgz
 scripts/verify-profile-install.sh            # 安装 / 组合 / 卸载
 scripts/verify-profile-boot.sh               # 启动（真实 host，OS 分配端口）
 ```
@@ -15,12 +15,14 @@ scripts/verify-profile-boot.sh               # 启动（真实 host，OS 分配�
 | `verify-profile-install.sh` | 基线 `--dump-config` → `dsh plugin add` → 组合出现插件行 → 契约检查（无生命周期脚本、无运行时依赖）→ `dsh plugin remove` → 回到基线 | 临时 `DSH_HOME`；不绑定端口 |
 | `verify-profile-boot.sh` | 同上安装后**真的启动 host**：`--port 0`（系统分配端口）+ `--no-open`，探活宿主自身 URL、验证插件路由（无令牌 403、带令牌 200 + HTML），然后停宿主、卸载、核对组合回基线 | 临时 `DSH_HOME`；`autoLogin: false` 的 quiet overlay（不登录、不联网）；端口由内核分配，不与正在运行的 DSH 冲突 |
 
-## 本次结果（2026-10-07）
+**profile 说明（如实标注）**：证据在临时 `DSH_HOME` 的 **`web` profile** 上取得——`desktop` profile 由 DSH 桌面端托管（`dsh plugin` 会转发给 App 的 Electron 二进制执行），无法在无人值守下反复装卸。manifest 声明的 `profiles: ['desktop']` 来自作者的本机日常运行（本插件就在 `~/.dsh/profiles/desktop` 里长期工作），而不是这两个脚本。
+
+## 本次结果（2026-10-10，包版本 0.1.35）
 
 安装 / 组合 / 卸载：
 
 ```json
-{"status":"passed","dsh":"0.2.0-rc.2","tarball":"dsh-wechat-0.1.28.tgz","install":true,"composition":true,"uninstall":true,"disposableProfile":true,"booted":false}
+{"status":"passed","dsh":"0.2.0-rc.2","tarball":"dsh-wechat-0.1.35.tgz","install":true,"composition":true,"uninstall":true,"disposableProfile":true,"booted":false}
 ```
 
 启动：
@@ -39,8 +41,9 @@ scripts/verify-profile-boot.sh               # 启动（真实 host，OS 分配�
 
 | 项 | 值 |
 | --- | --- |
-| 包 | `dsh-wechat@0.1.28` |
+| 包 | `dsh-wechat@0.1.35` |
 | Bundle Patch | `./cordis.patch.yml` |
+| 插件类型 | `feature` |
 | DSH 兼容声明 | `{"0.2.0-rc.2": "compatible", "0.2.0-rc.1": "unknown", "0.2.1-alpha.1": "unknown"}` |
 | 兼容范围 / profile | `>=0.2.0-rc.2 <0.3.0` / `desktop` |
 | Node / 系统 | `>=20` / `darwin, linux, win32` |
@@ -50,6 +53,7 @@ scripts/verify-profile-boot.sh               # 启动（真实 host，OS 分配�
 ## 覆盖边界（诚实标注）
 
 - ✅ **安装、组合、启动、卸载**：真实 `dsh` CLI，真实 host 进程，真实 HTTP 探活；
-- ❌ **不含微信端到端**：启动验证刻意 `autoLogin: false`，不扫码、不连 iLink 网关。微信收发闭环的证据是作者日常使用（本机桌面端长期运行）；
+- ⚠️ **profile**：证据在 `web` profile 上（见上），`desktop` 的兼容性来自作者日常运行；
+- ❌ **不含微信端到端**：启动验证刻意 `autoLogin: false`，不扫码、不连 iLink 网关；
 - ❌ **不含 `rollback`**：DSH 没有跨版本的插件回滚操作，商城的 `dshOperations.rollback` 我们无法提供证据，保持 `unknown`；
 - ❌ **不是独立安全审计**：本插件按固定源码权限信号自评为 `high`（见 README「权限、外部依赖与失败边界」），因此**不可能**满足 DSH STORE 的自动低风险通道。

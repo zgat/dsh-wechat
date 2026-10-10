@@ -565,3 +565,77 @@ test('/status shows how long ago the last error happened', async () => {
   const text = await commands.status([], { conversationKey: 'p2p:u', isOwner: true })
   assert.match(text, /最近错误（3 小时前）：ret=-2/)
 })
+
+test('progress lines never carry credential-shaped values', async () => {
+  const { toolProgressLine, redactText } = await import('../lib/render.js')
+  const cases = [
+    [{ a: { b: { c: { d: { e: { token: 'SUPER-SECRET-TOKEN-VALUE' } } } } } }, 'deep nesting'],
+    [{ sessionKey: 'abc123def456', passphrase: 'correct horse battery' }, 'JSON form'],
+    [{ 密码: 'SuperSecret123' }, 'a Chinese key name'],
+    [{ headers: { 'x-psk': 'psk-abcdef123456' } }, 'a PSK header'],
+    [{ command: 'git clone https://github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz@github.com/me/repo' }, 'a fine-grained PAT'],
+    [{ command: 'curl -H x: AIzaSyA1234567890abcdefghijklmnopqrst' }, 'a Google API key'],
+    [{ command: 'curl -H auth: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijklmnop' }, 'a JWT'],
+    [
+      { command: 'cat k.pem\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n-----END OPENSSH PRIVATE KEY-----' },
+      'a PEM private key',
+    ],
+  ]
+  for (const [args, label] of cases) {
+    const line = toolProgressLine('bash', args)
+    assert.equal(
+      /SUPER-SECRET|abc123def456|SuperSecret|psk-abcdef|github_pat_11|AIzaSyA|eyJhbGciOiJIUzI1NiJ9|b3BlbnNzaC1rZXk/.test(line),
+      false,
+      `${label} leaked: ${line}`,
+    )
+  }
+  // …and the rest of the line survives, so the progress line stays useful.
+  const kept = toolProgressLine('bash', { command: 'export GITHUB_TOKEN=abc123', file_path: '/tmp/x.txt' })
+  assert.match(kept, /file_path/)
+  assert.ok(!/abc123/.test(kept))
+  assert.equal(redactText('grep -n authorization src/'), 'grep -n authorization src/', 'plain prose is untouched')
+})
+
+test('splitText never exceeds its limit', async () => {
+  const { splitText } = await import('../lib/render.js')
+  // A boundary landing on the last index of the window used to produce limit+1 chars.
+  const text = `${'a'.repeat(1800)}。${'b'.repeat(500)}`
+  for (const chunk of splitText(text, 1800)) assert.ok(chunk.length <= 1800, `chunk of ${chunk.length}`)
+  // A nonsensical limit must not spin forever either.
+  assert.equal(splitText('x'.repeat(100), 0).length, 1)
+  assert.equal(splitText('x'.repeat(100), Number.NaN).length, 1)
+})
+
+test('a malformed state file is normalized instead of crashing the message path', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { WechatStore } = await import('../lib/store.js')
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-wechat-state-'))
+  try {
+    await mkdir(root, { recursive: true })
+    // Right keys, wrong shapes: `stats: null` used to throw on the next inbound message
+    // and `sessions: []` silently dropped every binding.
+    await writeFile(
+      path.join(root, 'state.json'),
+      JSON.stringify({ stats: null, sessions: [], seenMessageIds: 'nope', cursor: 42 }),
+    )
+    const store = new WechatStore({
+      config: normalizeConfig({ stateDir: root, accessPolicy: 'open' }),
+      logger: { info() {}, warn() {}, debug() {}, error() {} },
+    })
+    await store.load()
+    store.noteInbound()
+    store.rememberOutbound({ toUserId: 'u', text: 'hi' })
+    await store.setSession('p2p:u', 'session-1')
+    await store.saveState()
+    const reloaded = new WechatStore({
+      config: normalizeConfig({ stateDir: root, accessPolicy: 'open' }),
+      logger: { info() {}, warn() {}, debug() {}, error() {} },
+    })
+    await reloaded.load()
+    assert.equal(reloaded.state.stats.inbound, 1)
+    assert.equal(reloaded.state.sessions['p2p:u'], 'session-1', 'the binding survives a round trip')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

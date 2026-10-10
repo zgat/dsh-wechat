@@ -192,7 +192,7 @@ async function commandSend(flags, rest) {
 function commandQr(rest) {
   const text = rest.join(' ') || 'dsh-wechat: 请把要编码的文本作为参数传入'
   const matrix = encodeQrMatrix(text)
-  console.log(renderQrText(matrix, { quietZone: 2, invert: true }))
+  console.log(renderQrText(matrix, { quietZone: 4, invert: true }))
   console.log(text)
   return 0
 }

@@ -2053,7 +2053,7 @@ test('the recap and the depth answer never enter the DSH conversation', async ()
     await env.bridge.handleInbound(inboundMessage({ text: '2', id: 2 }))
     await waitFor(() => env.client.sent.length >= before + 2)
     assert.equal(env.harness.agents.length, 0, 'answering the depth must not open a session either')
-    assert.equal(env.harness.followups?.length ?? 0, 0, 'nothing may be sent to an agent yet')
+    assert.equal(env.harness.agents.flatMap((agent) => agent.followups).length, 0, 'nothing may be sent to an agent yet')
     assert.ok(
       env.client.sent.some((entry) => /旧问题二/.test(entry.text)),
       'the recap still reaches WeChat',

@@ -468,3 +468,114 @@ test('requests refuse redirects instead of re-posting the body elsewhere', async
     await new Promise((resolve) => server.close(resolve))
   }
 })
+
+test('a response body that stalls after the headers is still bounded by the timeout', async () => {
+  // The guard used to be cleared as soon as fetch() resolved, i.e. when the *headers*
+  // arrived: a peer that then went quiet hung the long poll, a send retry and
+  // channel.stop() forever (undici's 300s body timeout was the only backstop).
+  const { createServer } = await import('node:http')
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.flushHeaders()
+    // Deliberately never end the response.
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  try {
+    const client = new ILinkClient({ token: 'test-token', baseUrl, cdnBaseUrl: baseUrl, requestTimeoutMs: 300 })
+    const started = Date.now()
+    await assert.rejects(
+      () => client.sendText({ toUserId: 'u', text: 'hi', contextToken: 'c', clientId: 'id-1' }),
+      (error) => /timed out|stalled/i.test(String(error?.message)),
+      'a stalled body must surface as a timeout, not a hang',
+    )
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 5_000, `the timeout fired promptly (${elapsed}ms)`)
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('an already-aborted signal never sends the request', async () => {
+  let hits = 0
+  const { createServer } = await import('node:http')
+  const server = createServer((_request, response) => {
+    hits += 1
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end('{"ret":0}')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  try {
+    const client = new ILinkClient({ token: 't', baseUrl, cdnBaseUrl: baseUrl })
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(() => client.sendText({ toUserId: 'u', text: 'hi', contextToken: 'c', clientId: 'id-2', signal: controller.signal }))
+    assert.equal(hits, 0, 'the request must not reach the network once cancelled')
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('an undecryptable payload is stored with a marker instead of posing as the original', async () => {
+  const { mkdtemp, rm, readFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { downloadInboundItem, describeFilesForPrompt } = await import('../lib/ilink/media.js')
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-wechat-media-'))
+  try {
+    const ciphertext = Buffer.from('not-really-encrypted')
+    const client = {
+      downloadCdn: async () => ciphertext,
+    }
+    const file = await downloadInboundItem({
+      client,
+      item: {
+        type: 4,
+        file_item: {
+          file_name: '报表.pdf',
+          len: String(ciphertext.length),
+          media: {
+            encrypt_query_param: 'q',
+            // Not a valid AES key: decryption must fail and be reported as such.
+            aes_key: Buffer.from('short-key').toString('base64'),
+          },
+        },
+      },
+      dir,
+      logger: { warn() {}, info() {}, debug() {} },
+    })
+    assert.match(file.name, /\.pdf\.enc$/, `the name must say the bytes are ciphertext: ${file.name}`)
+    assert.equal((await readFile(file.path)).equals(ciphertext), true, 'the raw bytes are kept for recovery')
+    const described = describeFilesForPrompt([file])
+    assert.match(described, /解密失败/, 'the model is told the file is not readable content')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a dead status endpoint makes the login fetch a fresh QR instead of polling forever', async () => {
+  const { qrLogin } = await import('../lib/login.js')
+  let statusCalls = 0
+  const client = {
+    getBotQrCode: async () => ({ qrcode: 'qr-1', qrcodeImgContent: '' }),
+    getQrCodeStatus: async () => {
+      statusCalls += 1
+      throw new Error('gateway is down')
+    },
+  }
+  const started = Date.now()
+  const result = await qrLogin({
+    client,
+    paths: {},
+    logger: { warn() {}, info() {}, debug() {} },
+    maxQrCodes: 2,
+    presentQrCode: async () => {},
+    onStatus: () => {},
+  })
+  assert.equal(result, null, 'the login gives up instead of hanging')
+  assert.ok(statusCalls <= 10, `it stopped after a bounded number of attempts (${statusCalls})`)
+  assert.ok(Date.now() - started < 30_000, 'and it did not wait out a long retry loop')
+})
