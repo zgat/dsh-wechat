@@ -22,6 +22,7 @@ async function setup(options = {}) {
     logger,
     send: (key, text) => bridge.deliver(key, text),
     conversationOf: (sessionId) => bridge.conversationForSession(sessionId),
+    ownsInteraction: (sessionId) => bridge.isDrivingTurn(sessionId),
   })
   const bridge = new WechatBridge({
     ctx: harness.ctx,
@@ -365,7 +366,15 @@ test('a quote is carried into the prompt', async () => {
 })
 
 test('an approval request is answered from the chat', async () => {
-  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  const env = await setup({
+    config: { approvalTimeoutSeconds: 30 },
+    // Hold the turn open: approvals and questions happen *inside* a running turn, and
+    // the interaction router only claims what the WeChat turn started.
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
   try {
     await env.bridge.handleInbound(inboundMessage({ text: '删掉临时文件' }))
     await waitFor(() => env.harness.agents.length === 1)
@@ -392,7 +401,15 @@ test('an approval request is answered from the chat', async () => {
 })
 
 test('an approval can be rejected, and unknown text keeps waiting', async () => {
-  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  const env = await setup({
+    config: { approvalTimeoutSeconds: 30 },
+    // Hold the turn open: approvals and questions happen *inside* a running turn, and
+    // the interaction router only claims what the WeChat turn started.
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
   try {
     await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
     await waitFor(() => env.harness.agents.length === 1)
@@ -424,7 +441,15 @@ test('an approval for an unknown session delegates to the next answerer', async 
 })
 
 test('questions render options and accept a numbered reply', async () => {
-  const env = await setup({ config: { questionsTimeoutSeconds: 30 } })
+  const env = await setup({
+    config: { questionsTimeoutSeconds: 30 },
+    // Hold the turn open: approvals and questions happen *inside* a running turn, and
+    // the interaction router only claims what the WeChat turn started.
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
   try {
     await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
     await waitFor(() => env.harness.agents.length === 1)
@@ -2222,7 +2247,15 @@ test('tools keep running when the progress notifications are switched off', asyn
 })
 
 test('an approval raised by a delegated sub-agent is answerable from WeChat', async () => {
-  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  const env = await setup({
+    config: { approvalTimeoutSeconds: 30 },
+    // Hold the turn open: approvals and questions happen *inside* a running turn, and
+    // the interaction router only claims what the WeChat turn started.
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
   try {
     await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
     await waitFor(() => env.harness.agents.length === 1)
@@ -2252,7 +2285,15 @@ test('an approval raised by a delegated sub-agent is answerable from WeChat', as
 })
 
 test('an unrecognised reply while an approval is pending gets one reminder', async () => {
-  const env = await setup({ config: { approvalTimeoutSeconds: 30 } })
+  const env = await setup({
+    config: { approvalTimeoutSeconds: 30 },
+    // Hold the turn open: approvals and questions happen *inside* a running turn, and
+    // the interaction router only claims what the WeChat turn started.
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
   try {
     await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
     await waitFor(() => env.harness.agents.length === 1)
@@ -2615,5 +2656,79 @@ test('heartbeats are opt-out and never fire for turns from other clients', async
     assert.equal(beats.length, 0, 'no heartbeat for a turn nobody in WeChat started')
   } finally {
     await on.cleanup()
+  }
+})
+
+test('interactions from a turn WeChat did not start stay with their own client', async () => {
+  // Regression: the router used to claim every interaction in a *bound* session, so a
+  // question raised by a GUI turn was swallowed — the GUI showed no dialog and the card
+  // landed in a chat that was not even driving that turn.
+  const env = await setup({ config: { approvalTimeoutSeconds: 30, questionsTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+    assert.equal(env.bridge.conversationForSession(agent.session.id), 'p2p:user@im.wechat', 'the session is bound')
+    assert.equal(env.bridge.isDrivingTurn(agent.session.id), false, 'but WeChat is not driving it now')
+
+    let delegated = 0
+    const answer = await env.interactions.handleQuestions(
+      { agent, signal: new AbortController().signal, questions: [{ question: '选哪个？', options: ['A', 'B'] }] },
+      async () => {
+        delegated += 1
+        return 'gui-answer'
+      },
+    )
+    assert.equal(answer, 'gui-answer', 'the GUI handler answered')
+    assert.equal(delegated, 1, 'the request reached the next handler exactly once')
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), false, 'no reply slot claimed')
+
+    const approval = await env.interactions.handleApproval(
+      { agent, toolName: 'bash', reason: 'rm -rf /tmp/x', signal: new AbortController().signal },
+      async () => {
+        delegated += 1
+        return 'gui-decision'
+      },
+    )
+    assert.equal(approval, 'gui-decision')
+    assert.equal(delegated, 2)
+
+    // Nothing was pushed to the chat, and no reminder was armed for it.
+    assert.ok(!env.client.sent.some((entry) => /需要你的回答|需要你确认/.test(entry.text)), 'no card in WeChat')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a sub-agent question is claimed only while a WeChat turn owns the tree', async () => {
+  const env = await setup({
+    config: { questionsTimeoutSeconds: 30 },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const rootId = env.harness.agents[0].session.id
+
+    const childId = 'session-child-questions'
+    env.harness.sessions.set(childId, { id: childId, header: { id: childId, cwd: '/tmp', parentSession: rootId } })
+    const childAgent = { id: childId, session: { id: childId, header: { id: childId, cwd: '/tmp', parentSession: rootId } } }
+
+    assert.equal(env.bridge.isDrivingTurn(childId), true, 'a child counts as driven while the root turn runs')
+
+    const pending = env.interactions.handleQuestions(
+      { agent: childAgent, signal: new AbortController().signal, questions: [{ question: '继续吗？', options: ['继续', '停'] }] },
+      async () => 'delegated',
+    )
+    await waitFor(() => env.client.sent.some((entry) => /需要你的回答/.test(entry.text)), { label: 'child question card' })
+    await env.bridge.handleInbound(inboundMessage({ text: '继续', id: 98 }))
+    const answers = await pending
+    assert.equal(answers?.answers?.length, 1, 'the reply was consumed as the answer')
+    assert.match(JSON.stringify(answers.answers[0]), /继续/)
+  } finally {
+    await env.cleanup()
   }
 })
