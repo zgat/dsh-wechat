@@ -2920,3 +2920,113 @@ test('a session-expired send failure is not retried', async () => {
     await env.cleanup()
   }
 })
+
+test('a WeChat turn offers the approval to the other client too, and survives "no answerer there"', async () => {
+  // The person may be at the desk or on the phone, so a turn started here is offered to
+  // both. The host's terminal answerer resolves "unavailable" when nobody else can take
+  // it — that is not a decision and must not void the card in the chat.
+  const env = await setup({
+    config: { approvalTimeoutSeconds: 30 },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '删掉临时文件' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+
+    let otherCalls = 0
+    const pending = env.interactions.handleApproval(
+      { agent, toolName: 'bash', reason: 'rm -rf /tmp/x', signal: new AbortController().signal },
+      async () => {
+        otherCalls += 1
+        return 'unavailable' // the host's terminal value: nobody else can answer
+      },
+    )
+    await waitFor(() => env.client.sent.some((entry) => /需要你确认/.test(entry.text)), { label: 'approval card' })
+    assert.equal(otherCalls, 1, 'the other client was offered the request as well')
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), true, 'the chat still owns the reply slot')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '允许', id: 21 }))
+    assert.equal(await pending, 'allowed-once')
+    assert.ok(!env.client.sent.some((entry) => /作废/.test(entry.text)), 'no void notice when nobody else answered')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a WeChat question survives NO_PROVIDER from the other side, and yields when the other side answers', async () => {
+  const env = await setup({
+    config: { questionsTimeoutSeconds: 30 },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '开始' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+
+    // 1) Nobody else can answer: the host rejects with NO_PROVIDER, the chat keeps the card.
+    const pending = env.interactions.handleQuestions(
+      { agent, signal: new AbortController().signal, questions: [{ question: '继续吗？', options: ['继续', '停'] }] },
+      async () => {
+        const error = new Error('no user-questions answerer accepted the request')
+        error.code = 'NO_PROVIDER'
+        throw error
+      },
+    )
+    await waitFor(() => env.client.sent.some((entry) => /需要你的回答/.test(entry.text)), { label: 'question card' })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), true, 'the card is still live')
+    await env.bridge.handleInbound(inboundMessage({ text: '1', id: 22 }))
+    const answered = await pending
+    assert.equal(answered?.answers?.length, 1)
+
+    // 2) The other client really answers first: the chat's card is voided with a notice.
+    const before = env.client.sent.length
+    const second = env.interactions.handleQuestions(
+      { agent, signal: new AbortController().signal, questions: [{ question: '再来一次？', options: ['好'] }] },
+      async () => ({ answers: [{ id: 'q2', custom: 'GUI 答的' }] }),
+    )
+    const result = await second
+    assert.match(JSON.stringify(result), /GUI 答的/)
+    await waitFor(() => env.client.sent.slice(before).some((entry) => /已在原来的客户端上回答/.test(entry.text)), {
+      label: 'void notice',
+    })
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), false)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a real decision from the other client voids the WeChat approval card', async () => {
+  const env = await setup({
+    config: { approvalTimeoutSeconds: 30 },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ defer }) => defer(),
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '删掉临时文件' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+
+    const before = env.client.sent.length
+    const outcome = await env.interactions.handleApproval(
+      { agent, toolName: 'bash', signal: new AbortController().signal },
+      async () => 'rejected', // the desk answered first
+    )
+    assert.equal(outcome, 'rejected')
+    await waitFor(() => env.client.sent.slice(before).some((entry) => /已在原来的客户端上回答/.test(entry.text)), {
+      label: 'void notice',
+    })
+    assert.equal(env.interactions.isWaiting('p2p:user@im.wechat'), false, 'the chat slot was released')
+  } finally {
+    await env.cleanup()
+  }
+})
