@@ -2828,3 +2828,95 @@ test('after the WeChat turn ends, later interactions in that session belong to t
     await env.cleanup()
   }
 })
+
+test('a long answer is chunked, and the truncation notice says how much was left out', async () => {
+  const env = await setup({
+    config: { chunkChars: 200, maxAnswerChars: 500, chunkDelayMs: 0 },
+    harness: {
+      reply: 'x'.repeat(1200),
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '写长一点' }))
+    await waitFor(() => env.client.sent.some((entry) => /已省略/.test(entry.text)), { label: 'truncation notice' })
+    const texts = env.client.sent.map((entry) => entry.text)
+    const notice = texts.find((text) => /已省略/.test(text))
+    // 1200 chars of body, 500 kept → 700 left out.
+    assert.match(notice, /已省略 700 字/)
+    assert.match(notice, /完整内容见 DSH 会话记录/)
+    // Nothing was silently dropped: the kept part is all there, in chunks (the notice
+    // itself rides in the last chunk, so count characters rather than chunks).
+    const kept = texts.join('').split('x').length - 1
+    assert.equal(kept, 500, 'the delivered body is exactly the cap')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('maxAnswerChars: 0 sends the whole answer', async () => {
+  const env = await setup({
+    config: { chunkChars: 400, maxAnswerChars: 0, chunkDelayMs: 0 },
+    harness: {
+      reply: 'y'.repeat(1000),
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '全文发给我' }))
+    await waitFor(() => env.client.sent.map((entry) => entry.text).join('').split('y').length - 1 === 1000, {
+      label: 'the whole answer',
+    })
+    assert.ok(!env.client.sent.some((entry) => /已省略/.test(entry.text)), 'no truncation notice')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a rate-limited chunk (ret=-2) is retried instead of lost', async () => {
+  // iLink answers `ret=-2 (prepare failed)` when sends come too fast; that refused chunk
+  // used to be dropped from the answer with no second attempt.
+  const env = await setup({ config: { chunkDelayMs: 0, sendRetryMs: [1, 1, 1] } })
+  try {
+    let attempts = 0
+    const original = env.client.sendText.bind(env.client)
+    env.client.sendText = async (request) => {
+      attempts += 1
+      if (attempts === 1) {
+        const error = new Error('ilink: POST /ilink/bot/sendmessage failed with ret=-2 (prepare failed)')
+        error.ret = -2
+        throw error
+      }
+      return original(request)
+    }
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.client.sent.length > 0, { label: 'the answer' })
+    assert.ok(attempts >= 2, `the chunk was retried (attempts=${attempts})`)
+    assert.ok(!env.client.sent.some((entry) => /未能发出/.test(entry.text)), 'no failure notice')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a session-expired send failure is not retried', async () => {
+  const env = await setup({ config: { chunkDelayMs: 0, sendRetryMs: [1, 1, 1] } })
+  try {
+    // Count attempts per message: the answer chunk and the failure notice are two
+    // different messages, and neither may be retried when the session is gone.
+    const attemptsById = new Map()
+    env.client.sendText = async (request) => {
+      attemptsById.set(request.clientId, (attemptsById.get(request.clientId) ?? 0) + 1)
+      const error = new Error('ilink: POST /ilink/bot/sendmessage failed with ret=-14 (session expired)')
+      error.ret = -14
+      throw error
+    }
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    // The failure notice cannot be delivered either (every send fails), so assert on what
+    // the plugin recorded: exactly one attempt, and the reason kept for /status.
+    await waitFor(() => /回复发送失败/.test(env.store.state.stats?.lastError?.message ?? ''), { label: 'recorded failure' })
+    assert.deepEqual([...attemptsById.values()], [1, 1], 'each message was tried exactly once')
+    assert.match(env.store.state.stats.lastError.message, /ret=-14/)
+  } finally {
+    await env.cleanup()
+  }
+})
