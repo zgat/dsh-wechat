@@ -2732,3 +2732,81 @@ test('a sub-agent question is claimed only while a WeChat turn owns the tree', a
     await env.cleanup()
   }
 })
+
+test('with /listen on, a GUI turn still keeps its own question and approval', async () => {
+  // Following (/listen) decides whether *finished* turns are echoed to the chat. It must
+  // not touch interaction ownership: a question raised by a GUI turn has to stay in the
+  // GUI even while the chat is following that session.
+  const env = await setup({ config: { approvalTimeoutSeconds: 30, questionsTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const session = env.harness.agents[0].session
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/listen', id: 2 }))
+    await waitFor(() => env.bridge.isFollowing('p2p:user@im.wechat'))
+    assert.equal(env.bridge.isDrivingTurn(session.id), false, 'following is not driving')
+
+    let delegated = 0
+    const answered = await env.interactions.handleQuestions(
+      { agent: env.harness.agents[0], signal: new AbortController().signal, questions: [{ question: '选哪个？', options: ['A', 'B'] }] },
+      async () => {
+        delegated += 1
+        return 'gui-answer'
+      },
+    )
+    assert.equal(answered, 'gui-answer', 'the GUI answers its own turn')
+    assert.equal(delegated, 1)
+    assert.ok(!env.client.sent.some((entry) => /需要你的回答/.test(entry.text)), 'no question card in WeChat')
+
+    const approval = await env.interactions.handleApproval(
+      { agent: env.harness.agents[0], toolName: 'bash', signal: new AbortController().signal },
+      async () => {
+        delegated += 1
+        return 'gui-decision'
+      },
+    )
+    assert.equal(approval, 'gui-decision')
+    assert.equal(delegated, 2)
+    assert.ok(!env.client.sent.some((entry) => /需要你确认/.test(entry.text)), 'no approval card either')
+
+    // What following *does* deliver: the finished turn's text, marked as coming from
+    // another client. It arrives after the GUI turn ends, never as a question.
+    env.bridge.onSessionEvent(session, {
+      type: 'assistant/message',
+      data: { turn: 5, message: { role: 'assistant', content: [{ type: 'text', text: 'GUI 的结果' }] } },
+    })
+    env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
+    await waitFor(() => env.client.sent.some((entry) => /GUI 的结果/.test(entry.text)), { label: 'followed result' })
+    const followed = env.client.sent.find((entry) => /GUI 的结果/.test(entry.text))
+    assert.match(followed.text, /📥 其他客户端/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('after the WeChat turn ends, later interactions in that session belong to their own client', async () => {
+  // Ownership follows the *running* turn, not the binding: once our turn is over, a
+  // question raised by a later turn (a GUI turn, a background job) stays with it.
+  const env = await setup({ config: { questionsTimeoutSeconds: 30 } })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    const agent = env.harness.agents[0]
+    assert.equal(env.bridge.isDrivingTurn(agent.session.id), false, 'our turn already finished')
+
+    let delegated = 0
+    const answered = await env.interactions.handleQuestions(
+      { agent, signal: new AbortController().signal, questions: [{ question: '后来才问的', options: ['A'] }] },
+      async () => {
+        delegated += 1
+        return 'gui'
+      },
+    )
+    assert.equal(answered, 'gui')
+    assert.equal(delegated, 1)
+    assert.ok(!env.client.sent.some((entry) => /需要你的回答/.test(entry.text)), 'nothing pushed to WeChat')
+  } finally {
+    await env.cleanup()
+  }
+})
