@@ -23,7 +23,13 @@ function makeRouter(options = {}) {
   const sent = []
   const calls = { other: 0 }
   const router = new InteractionRouter({
-    config: { approvalTimeoutSeconds: 0.05, questionsTimeoutSeconds: 0.05, ...(options.config ?? {}) },
+    config: {
+      approvalTimeoutSeconds: 0.05,
+      questionsTimeoutSeconds: 0.05,
+      // The dedicated dismissal tests opt in; the others must not race a 50ms timer.
+      closeRemoteDialogAfterAnswer: false,
+      ...(options.config ?? {}),
+    },
     logger: silentLogger,
     send: async (_conversationKey, text) => {
       if (options.sendFails) throw new Error('dsh-wechat: bridge is not ready yet')
@@ -134,4 +140,85 @@ test('only a request this chat is involved in is answered here', async () => {
   )
   assert.equal(outcome, 'rejected')
   assert.equal(sent.length, 0, 'nothing was pushed to the chat')
+})
+
+test('the other client is asked to close its dialog only after the decision is accepted', async () => {
+  // The host's decide() races the waterfall against request.signal and resolves
+  // "cancelled" on abort. Mimic that faithfully: the abort listener must be *removed* by
+  // the time we dispatch, otherwise a WeChat "allow" becomes a denial.
+  const sent = []
+  const router = new InteractionRouter({
+    config: { approvalTimeoutSeconds: 30, closeRemoteDialogAfterAnswer: true },
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    send: async (_key, text) => sent.push(text),
+    conversationOf: () => 'p2p:user@im.wechat',
+    ownsInteraction: () => true,
+    watchesInteraction: () => false,
+  })
+  const controller = new AbortController()
+  const order = []
+  // The host's side of the race.
+  const decided = new Promise((resolve) => {
+    const onAbort = () => {
+      order.push('host-cancelled')
+      resolve('cancelled')
+    }
+    controller.signal.addEventListener('abort', onAbort, { once: true })
+    setTimeout(() => {
+      // Our answer arrives first, exactly like the plugin resolving its waterfall promise.
+      order.push('our-answer')
+      controller.signal.removeEventListener('abort', onAbort)
+      resolve('allowed-once')
+    }, 10)
+    // …and the dismissal must reach the other client after that.
+    const onDismiss = () => order.push('dismissed')
+    controller.signal.addEventListener('abort', () => {
+      if (order.includes('our-answer')) onDismiss()
+    })
+  })
+
+  const pending = router.handleApproval(
+    { agent: { session: { id: 's1' } }, toolName: 'bash', signal: controller.signal },
+    async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      return 'rejected'
+    },
+  )
+  // Wait for our own reply path: answering here is what the chat does.
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '允许'), true)
+  assert.equal(await pending, 'allowed-once', 'the chat answer wins and is not cancelled')
+  const hostOutcome = await decided
+  assert.equal(hostOutcome, 'allowed-once', 'the host saw the allow, not a cancellation')
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  assert.deepEqual(order.slice(0, 2), ['our-answer', 'dismissed'], `order was ${order.join(', ')}`)
+  assert.ok(!order.includes('host-cancelled'), 'the host must not observe an abort')
+})
+
+test('closeRemoteDialogAfterAnswer: false leaves the other dialog alone', async () => {
+  const router = new InteractionRouter({
+    config: { approvalTimeoutSeconds: 30, closeRemoteDialogAfterAnswer: false },
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    send: async () => {},
+    conversationOf: () => 'p2p:user@im.wechat',
+    ownsInteraction: () => true,
+    watchesInteraction: () => false,
+  })
+  const controller = new AbortController()
+  let aborted = false
+  controller.signal.addEventListener('abort', () => {
+    aborted = true
+  })
+  const pending = router.handleApproval(
+    { agent: { session: { id: 's1' } }, toolName: 'bash', signal: controller.signal },
+    async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      return 'rejected'
+    },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  router.tryConsume('p2p:user@im.wechat', '允许')
+  assert.equal(await pending, 'allowed-once')
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  assert.equal(aborted, false, 'nothing was dispatched')
 })
