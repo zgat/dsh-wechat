@@ -342,7 +342,7 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 | `typingKeepaliveSeconds` | `5` | 输入状态的保活间隔 |
 | `progress` | `brief` | `off` 只回最终答案；`brief` 加工具进度；`verbose` 再加中间说明 |
 | `showToolProgress` | `true` | `progress != off` 时是否推送 `🔧 tool` 行 |
-| `turnTimeoutSeconds` | `900` | 单轮最长等待，超时后在微信里提示（回合仍在后台继续） |
+| `turnTimeoutSeconds` | `900` | 单轮最长等待；超时后发一条提示（回合仍在后台继续）。**提示里会请你回一句话或 `/listen`**——微信侧主动推送的上下文只有约 15–30 分钟有效（实测），你冒个泡之后，跑完的答案才会补发到这里 |
 | `progressHeartbeatSeconds` | `300` | 回合跑着的时候每隔这么久发一行 `🔄 仍在处理中…（已 X 分 Y 秒｜最后一步：bash）`，让长任务不静默；`0` 关闭。**只对你在微信里发起的回合生效**（跟读来的其它客户端回合不心跳），每轮最多 12 条；`showToolProgress: false` 时心跳不带工具名 |
 | `approvalTimeoutSeconds` | `300` | 审批等待时长，超时交给下一个应答者（例如桌面端弹窗） |
 | `questionsTimeoutSeconds` | `600` | 提问等待时长，超时同上 |
@@ -419,7 +419,8 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 
 - **只支持私聊**：iLink 的群消息没有可靠的回复路由，群里的消息会被忽略并在日志里记一条；
 - 主动推送依赖最近一次入站消息带来的 `context_token`：太久没互动、或清空了状态后，机器人无法先开口；让对方先发一条消息即可恢复；
-- 一轮默认最多等 15 分钟（`turnTimeoutSeconds`），超时会在微信里提示，但回合仍在后台继续跑完，可用 `/status` 查看。
+- 一轮默认最多等 15 分钟（`turnTimeoutSeconds`）；超时会在微信里提示，**回合仍在后台继续跑完**。
+- **超时之后想在这里收到结果，就先回一句话（或发 `/listen`）**：微信侧的推送上下文约 15–30 分钟失效（实测：+15 分钟成功、+30 分钟起报 `ret=-2 prepare failed`，刷新后立刻恢复），所以插件需要你先冒个泡；你一发消息，那一轮就会被"复活"，跑完的答案照常补发。
 
 ## 6. 微信里的命令
 

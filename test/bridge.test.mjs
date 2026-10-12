@@ -3132,3 +3132,34 @@ test('a chunk refused under a burst is resent on the second pass', async () => {
     await env.cleanup()
   }
 })
+
+test('the timeout notice tells the person to write again, and writing revives the turn', async () => {
+  // The push context is only good for ~15-30 minutes, so a late answer cannot be pushed
+  // out of the blue. The notice asks the person to write (or /listen), and that inbound
+  // message revives the timed-out turn so its answer is delivered instead of dropped.
+  const env = await setup({
+    config: { turnTimeoutSeconds: 5, chunkDelayMs: 0 },
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      respond: ({ agent, defer }) => {
+        defer()
+        // Finish long after the timeout has fired.
+        setTimeout(() => agent.completeDeferredTurn('拖了很久的答案'), 7_000)
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '跑个长任务' }))
+    await waitFor(() => env.client.sent.some((entry) => /仍未结束/.test(entry.text)), { timeoutMs: 9_000, label: 'timeout notice' })
+    const notice = env.client.sent.find((entry) => /仍未结束/.test(entry.text)).text
+    assert.match(notice, /发 \/listen|回一句话/, 'the notice says how to keep receiving')
+    assert.match(notice, /15–30 分钟/, 'and why it is needed')
+
+    // The person writes again: the stalled turn is revived…
+    await env.bridge.handleInbound(inboundMessage({ text: '还在吗', id: 42 }))
+    // …so when it finally ends, the answer lands in the chat.
+    await waitFor(() => env.client.sent.some((entry) => /拖了很久的答案/.test(entry.text)), { timeoutMs: 12_000, label: 'late answer' })
+  } finally {
+    await env.cleanup()
+  }
+})
