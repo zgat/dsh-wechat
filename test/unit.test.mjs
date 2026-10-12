@@ -639,3 +639,15 @@ test('a malformed state file is normalized instead of crashing the message path'
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('an approval card never shows [object Object] as its reason', async () => {
+  const { formatApprovalPrompt } = await import('../lib/approval.js')
+  // The host ships the reason as a structure; it used to be interpolated verbatim.
+  assert.match(formatApprovalPrompt({ toolName: 'bash', reason: { code: 'sandbox', message: '越界写入' } }), /原因：越界写入/)
+  assert.match(formatApprovalPrompt({ toolName: 'bash', reason: { code: 'policy' } }), /原因：policy/)
+  assert.match(formatApprovalPrompt({ toolName: 'bash', reason: '纯文本' }), /原因：纯文本/)
+  for (const reason of [{ code: 'x' }, { message: 'ok' }, 'text', 42, undefined, null, {}]) {
+    const text = formatApprovalPrompt({ toolName: 'bash', reason })
+    assert.equal(text.includes('[object Object]'), false, `leaked for ${JSON.stringify(reason)}`)
+  }
+})
