@@ -2474,8 +2474,9 @@ test('/listen starts forwarding turns that other clients started', async () => {
     env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 43, reason: { kind: 'completed' } } })
     await waitFor(() => env.client.sent.some((entry) => /GUI 的答案二/.test(entry.text)))
     const forwarded = env.client.sent.map((entry) => entry.text).find((text) => /GUI 的答案二/.test(text))
-    assert.match(forwarded, /📥 其他客户端/)
-    assert.match(forwarded, new RegExp(sessionId.slice(-8)))
+    assert.equal(forwarded.includes('📥'), false, 'no prefix on followed results')
+    assert.equal(forwarded.includes('其他客户端'), false, 'nothing is attributed in the chat')
+    assert.equal(forwarded.trim(), 'GUI 的答案二', 'the followed answer is delivered as-is')
 
     // A failure with no text is still reported, so the chat is not left guessing.
     env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 44, reason: { kind: 'error' } } })
@@ -2506,7 +2507,10 @@ test('/mute stops the feed again, and WeChat-initiated turns are never duplicate
     await new Promise((resolve) => setTimeout(resolve, 80))
     const answers = env.client.sent.filter((entry) => entry.text === '微信自己的回答')
     assert.equal(answers.length, 2, `expected two answers (one per turn), got ${JSON.stringify(env.client.sent.map((e) => e.text.slice(0, 30)))}`)
-    assert.ok(!env.client.sent.some((entry) => /📥/.test(entry.text)), 'no follow-up copy of our own turn')
+    assert.ok(
+      !env.client.sent.some((entry) => /📥|其他客户端/.test(entry.text)),
+      'no follow-up copy of our own turn',
+    )
 
     await env.bridge.handleInbound(inboundMessage({ text: '/mute', id: 4 }))
     await waitFor(() => env.client.sent.some((entry) => /已停止接收/.test(entry.text)))
@@ -2805,7 +2809,11 @@ test('with /listen on, a GUI turn\'s interaction is offered to both sides and th
     })
     env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
     await waitFor(() => env.client.sent.some((entry) => /GUI 的结果/.test(entry.text)), { label: 'followed result' })
-    assert.match(env.client.sent.find((entry) => /GUI 的结果/.test(entry.text)).text, /📥 其他客户端/)
+    assert.equal(
+      env.client.sent.find((entry) => /GUI 的结果/.test(entry.text)).text.trim(),
+      'GUI 的结果',
+      'followed text arrives without a header',
+    )
   } finally {
     await env.cleanup()
   }
