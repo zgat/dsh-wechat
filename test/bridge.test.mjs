@@ -1119,7 +1119,8 @@ test('a transient send failure is retried once', async () => {
 })
 
 test('a persistent send failure is contained, recorded and reported', async () => {
-  const env = await setup()
+  // Fast retries: this case is about containment, not about waiting out the real ladder.
+  const env = await setup({ config: { sendRetryMs: [1, 1, 1], chunkDelayMs: 0 } })
   try {
     env.client.sendText = async () => {
       throw new Error('network down')
@@ -1130,7 +1131,9 @@ test('a persistent send failure is contained, recorded and reported', async () =
     assert.equal(sent, 0)
     assert.match(env.store.state.stats.lastError.message, /network down/)
     const info = await env.bridge.describeConversation('p2p:user@im.wechat')
-    assert.match(info.stats.lastError.message, /回复发送失败/)
+    // The final entry is the two-pass summary (it keeps the cause), so accept either form.
+    assert.match(info.stats.lastError.message, /回复发送失败|未能发出/)
+    assert.match(info.stats.lastError.message, /network down/, 'the cause survives into /status')
   } finally {
     await env.cleanup()
   }
@@ -1706,7 +1709,8 @@ test('a transient send failure is retried once', async () => {
 })
 
 test('a persistent send failure is contained, recorded and reported', async () => {
-  const env = await setup()
+  // Fast retries: this case is about containment, not about waiting out the real ladder.
+  const env = await setup({ config: { sendRetryMs: [1, 1, 1], chunkDelayMs: 0 } })
   try {
     env.client.sendText = async () => {
       throw new Error('network down')
@@ -1717,7 +1721,9 @@ test('a persistent send failure is contained, recorded and reported', async () =
     assert.equal(sent, 0)
     assert.match(env.store.state.stats.lastError.message, /network down/)
     const info = await env.bridge.describeConversation('p2p:user@im.wechat')
-    assert.match(info.stats.lastError.message, /回复发送失败/)
+    // The final entry is the two-pass summary (it keeps the cause), so accept either form.
+    assert.match(info.stats.lastError.message, /回复发送失败|未能发出/)
+    assert.match(info.stats.lastError.message, /network down/, 'the cause survives into /status')
   } finally {
     await env.cleanup()
   }
@@ -2878,7 +2884,7 @@ test('maxAnswerChars: 0 sends the whole answer', async () => {
 test('a rate-limited chunk (ret=-2) is retried instead of lost', async () => {
   // iLink answers `ret=-2 (prepare failed)` when sends come too fast; that refused chunk
   // used to be dropped from the answer with no second attempt.
-  const env = await setup({ config: { chunkDelayMs: 0, sendRetryMs: [1, 1, 1] } })
+  const env = await setup({ config: { chunkDelayMs: 0, sendRetryMs: [1, 1, 1], chunkDelayMs: 0 } })
   try {
     let attempts = 0
     const original = env.client.sendText.bind(env.client)
@@ -2901,7 +2907,7 @@ test('a rate-limited chunk (ret=-2) is retried instead of lost', async () => {
 })
 
 test('a session-expired send failure is not retried', async () => {
-  const env = await setup({ config: { chunkDelayMs: 0, sendRetryMs: [1, 1, 1] } })
+  const env = await setup({ config: { chunkDelayMs: 0, sendRetryMs: [1, 1, 1], chunkDelayMs: 0 } })
   try {
     // Count attempts per message: the answer chunk and the failure notice are two
     // different messages, and neither may be retried when the session is gone.
@@ -3081,6 +3087,39 @@ test('a queued message never adopts the turn another client was already running'
     })
     env.bridge.onSessionEvent(session, { type: 'turn/end', data: { turn: 8, reason: { kind: 'completed' } } })
     await waitFor(() => env.client.sent.some((entry) => /我的答案/.test(entry.text)), { label: 'my own answer' })
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a chunk refused under a burst is resent on the second pass', async () => {
+  // iLink answers ret=-2 (prepare failed) when sends come too fast. Retrying the ladder
+  // may still lose the piece; the second pass waits out the burst and delivers it.
+  const env = await setup({ config: { sendRetryMs: [1, 1], chunkDelayMs: 0 } })
+  try {
+    const original = env.client.sendText.bind(env.client)
+    const attempts = new Map()
+    let burstOver = false
+    setTimeout(() => {
+      burstOver = true
+    }, 150)
+    env.client.sendText = async (request) => {
+      const count = (attempts.get(request.clientId) ?? 0) + 1
+      attempts.set(request.clientId, count)
+      if (!burstOver) {
+        const error = new Error('ilink: POST /ilink/bot/sendmessage failed with ret=-2 (prepare failed)')
+        error.ret = -2
+        throw error
+      }
+      return original(request)
+    }
+    const sent = await env.bridge.deliver('p2p:user@im.wechat', '限流也要送达')
+    assert.equal(sent, 1, 'the second pass delivered the chunk')
+    assert.ok(env.client.sent.some((entry) => /限流也要送达/.test(entry.text)))
+    assert.ok(
+      !/未能发出/.test(env.store.state.stats?.lastError?.message ?? ''),
+      'nothing is reported missing when the second pass succeeds',
+    )
   } finally {
     await env.cleanup()
   }
