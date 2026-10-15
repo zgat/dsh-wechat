@@ -4,6 +4,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { checkAccess, defaultConfig, normalizeConfig } from '../lib/config.js'
+import { formatQuestionsPrompt, parseQuestionsReply } from '../lib/approval.js'
 import { parseCommand } from '../lib/commands.js'
 import { helpText } from '../lib/onboarding.js'
 import { briefValue, normalizeAnswer, redactText, splitText, toolProgressLine } from '../lib/render.js'
@@ -650,4 +651,46 @@ test('an approval card never shows [object Object] as its reason', async () => {
     const text = formatApprovalPrompt({ toolName: 'bash', reason })
     assert.equal(text.includes('[object Object]'), false, `leaked for ${JSON.stringify(reason)}`)
   }
+})
+
+test('a question answer is recognised by number, label or free text', () => {
+  const questions = [
+    { id: 'q1', question: '选哪个？', options: [{ label: '方案 A：微信侧实现' }, { label: '方案 B：GUI 侧实现' }] },
+  ]
+  const pick = (input) => {
+    const parsed = parseQuestionsReply(questions, input)
+    const answer = parsed?.answers?.[0]
+    return answer?.selected?.length ? questions[0].options.findIndex((o) => o.label === answer.selected[0]) : -1
+  }
+  // Position numbers, with or without trailing punctuation.
+  assert.equal(pick('1'), 0)
+  assert.equal(pick('2'), 1)
+  assert.equal(pick('2.'), 1)
+  // The label itself, a distinctive prefix of it, and a lone option letter.
+  assert.equal(pick('方案 A：微信侧实现'), 0)
+  assert.equal(pick('方案 A'), 0)
+  assert.equal(pick('方案 B'), 1)
+  assert.equal(pick('B'), 1)
+  assert.equal(pick('b'), 1)
+  // Prose that merely mentions an option stays prose (the model reads it as a custom answer).
+  assert.equal(pick('方案 A 太贵了'), -1)
+  assert.equal(pick('我选方案 B'), -1)
+  assert.equal(pick('都行'), -1)
+  assert.equal(parseQuestionsReply(questions, '方案 A 太贵了').answers[0].custom, '方案 A 太贵了')
+  // Several questions: one line each, numbers or labels.
+  const two = [
+    { id: 'a', options: [{ label: '是' }, { label: '否' }] },
+    { id: 'b', options: [{ label: '红' }, { label: '蓝' }] },
+  ]
+  assert.deepEqual(parseQuestionsReply(two, '是\n蓝').answers, [
+    { id: 'a', selected: ['是'] },
+    { id: 'b', selected: ['蓝'] },
+  ])
+  assert.equal(parseQuestionsReply(two, '是'), null, 'one line cannot answer two questions')
+  // Multi-select accepts labels as well as numbers.
+  const multi = [{ id: 'm', multi_select: true, options: [{ label: '甲' }, { label: '乙' }, { label: '丙' }] }]
+  assert.deepEqual(parseQuestionsReply(multi, '甲,3').answers, [{ id: 'm', selected: ['甲', '丙'] }])
+  // The card tells the person both forms work.
+  const card = formatQuestionsPrompt(questions)
+  assert.match(card, /序号或选项文字/)
 })
