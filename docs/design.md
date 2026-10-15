@@ -159,6 +159,7 @@ $DSH_HOME/integrations/dsh-wechat/
 | `agent/assistant-stream` 的 `start/chunk/end` | `AssistantStreamFrame` |
 | `session/event` 的 `turn/start`、`turn/end{reason}`、`tool/call{name,arguments}` | `SessionEventMap` |
 | `approval/request`、`user-questions/request`（waterfall） | 注册方式 `{global:true, prepend:true}`；返回值分别为 `allowed-once/rejected/cancelled` 与 `{answers:[{id,selected,custom?}]}` |
+| `agentCtx.systemPrompt.section({ name, order, text })` | `dsh-system-prompt` 的有序提示词注册表；通过 `agentCtx` 注册只作用于该 agent（顺序表见该包 `SECTION_ORDERS`，Web 渠道说明在 10100，我们排在 10150） |
 | `ctx.tools.register({ name, description, parameters, output, execute })` | `ToolRuntime.register` |
 | `ctx.effect` / `ctx.on` / `ctx.inject` | cordis 4.x |
 
@@ -166,17 +167,29 @@ $DSH_HOME/integrations/dsh-wechat/
 
 **为什么有时要重启**：宿主对**配置**是热应用的（改 `cordis.patch.yml` 后插件被重新 `apply`，实测 `loginPage: false` 后扫码页端口约 1 秒关闭），但**已加载的模块不会被重新 import**——所以升级 tarball 后必须重启才能跑新代码。`hmr` 行默认 `root: []`（不监听源码），`dsh plugin add <tgz>` 是拷贝、`add <目录>`/`link:` 才指向源码目录（HMR 用 `realpathSync()` 匹配）。
 
+## 渠道提示词
+
+本插件创建的每个会话在 `setup` 期注册一段 agent 作用域的提示词（`dsh-wechat:channel`，order 10150，紧随宿主的 Web 渠道说明 10100）：
+
+- 最终回答会被自动分段发送到微信 → 不要用 `wechat_send_text` 重复同样的内容；
+- 交付文件/图片用 `wechat_send_file`（绝对路径）——只落盘用户在微信里看不到；
+- 长内容先写成文件再发；微信界面窄，正文保持简短；
+- 等待类进展可用 `wechat_send_text` 发一句；
+- 用户可用 `/status`、`/stop`、`/session`，不必复述命令表。
+
+设计要点：**通过 `agentCtx` 注册而非全局**，因此只影响本插件创建/恢复的会话；profile 未提供 `systemPrompt` 服务时静默跳过（不影响会话创建），注册失败只记一条警告。
+
 ## 测试与证据
 
 ```sh
-npm test          # 215 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 216 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |
 | --- | --- |
 | `test/qr.test.mjs` | 二维码编码器与 `qrcode`（devDependency，仅作校验基准）逐模块比对，含 1–271 字节全部长度；终端/SVG 渲染几何 |
 | `test/ilink.test.mjs` | 对真实 HTTP 假网关跑完整协议：扫码登录、长轮询游标、请求头与信封、`sendmessage` 结构、输入状态、AES-128-ECB 上传/下载两种密钥编码、`ret=-14`、HTTP 与非 JSON 错误映射、响应体停滞超时、已 abort 的 signal 不发请求、解密失败落盘为 `<名称>.enc` |
-| `test/bridge.test.mjs` | 消息 → 会话 → 回合 → 回复全链路：会话复用/续聊、去重、回声丢弃、白名单、分段与截断、`aborted/error` 语义、工具进度、命令、`/new` `/stop`、输入状态、附件落盘、引用消息、审批与提问、主动发送、文件回传、限流二次补发、跟读（含去前缀）、超时与复活、回合归属 |
+| `test/bridge.test.mjs` | 消息 → 会话 → 回合 → 回复全链路、渠道提示词注册：会话复用/续聊、去重、回声丢弃、白名单、分段与截断、`aborted/error` 语义、工具进度、命令、`/new` `/stop`、输入状态、附件落盘、引用消息、审批与提问、主动发送、文件回传、限流二次补发、跟读（含去前缀）、超时与复活、回合归属 |
 | `test/interactions.test.mjs` | 交互时序（毫秒级超时）：微信作答不触碰 `request.signal`、卡片过期后交给另一端而不挂起、发送失败仍能结算、自动关框的先后顺序、`closeRemoteDialogAfterAnswer: false` |
 | `test/plugin.test.mjs` | 用真实 `@deepseek-ai/cordis` 启动插件，接真实 HTTP 假网关：监听到达、工具注册/注销、环境变量凭据、卸载后停止轮询；并跑通「无凭据 → 扫码页 → 二维码 → 确认 → 写凭据 → 收发」 |
 | `test/sideeffects.test.mjs` | 副作用预算（**递归扫描、运行时与工具链分域**）：子进程只有一处且先校验、禁止 osascript/开机项/剪贴板/`process.exit`、唯一监听 Socket 绑回环、出站域名白名单、每个 `setInterval` 必须 `unref`、凭据与附件 0600/0700、写文件目标白名单、工具链只碰文档化的系统路径 |

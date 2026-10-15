@@ -3163,3 +3163,39 @@ test('the timeout notice tells the person to write again, and writing revives th
     await env.cleanup()
   }
 })
+
+test('a WeChat session gets the channel brief, and a missing prompt service is harmless', async () => {
+  // The agent owns the wechat_* tools but had no reason to use them: it wrote a file and
+  // said "done", and the person in the chat never saw it. The brief is registered through
+  // the agent's own context, so it can only affect sessions this bridge created.
+  const registrations = []
+  const env = await setup({
+    harness: {
+      agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) },
+      services: { systemPrompt: { section: (entry) => registrations.push(entry) } },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+    assert.equal(registrations.length, 1, 'exactly one brief per agent')
+    const entry = registrations[0]
+    assert.equal(entry.name, 'dsh-wechat:channel')
+    assert.ok(entry.order > 10100, 'placed after the host web-surface brief')
+    assert.match(entry.text, /wechat_send_file/, 'the model is told how to deliver files')
+    assert.match(entry.text, /最终回答会被自动分段发送/, 'and that its answer already reaches the chat')
+  } finally {
+    await env.cleanup()
+  }
+
+  // No systemPrompt service (minimal profile): the session must still open.
+  const bare = await setup({
+    harness: { agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) } },
+  })
+  try {
+    await bare.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => bare.harness.agents.length === 1, { label: 'session opens without a prompt service' })
+  } finally {
+    await bare.cleanup()
+  }
+})
