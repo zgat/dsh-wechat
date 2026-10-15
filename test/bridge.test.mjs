@@ -3199,3 +3199,72 @@ test('a WeChat session gets the channel brief, and a missing prompt service is h
     await bare.cleanup()
   }
 })
+
+test('two sends issued together come out in order, never interleaved', async () => {
+  // deliver()/deliverFile() used to send immediately, so two calls made in the same turn
+  // raced: the second caption could land between the first answer's chunks, an image could
+  // arrive before the caption introducing it, and a progress line could cut a reply in half.
+  const env = await setup({ config: { chunkChars: 200, chunkDelayMs: 0 } })
+  try {
+    const original = env.client.sendText.bind(env.client)
+    const order = []
+    env.client.sendText = async (request) => {
+      const first = String(request.text).slice(0, 12)
+      order.push(`start:${first}`)
+      // The first send is slow, the second one is fast: without a queue the fast one wins.
+      await new Promise((resolve) => setTimeout(resolve, order.length === 1 ? 120 : 0))
+      const result = await original(request)
+      order.push(`done:${first}`)
+      return result
+    }
+    const long = `${'甲'.repeat(220)}`
+    const first = env.bridge.deliver('p2p:user@im.wechat', long)
+    const second = env.bridge.deliver('p2p:user@im.wechat', '第二条消息')
+    await Promise.all([first, second])
+    // Every chunk of the first message completes before the second message starts.
+    const secondStart = order.findIndex((entry) => entry.startsWith('start:第二条消息'))
+    const firstDone = order.filter((entry) => entry.startsWith('done:甲')).length
+    assert.ok(secondStart > 0, 'the second message was sent')
+    const firstDoneBefore = order.slice(0, secondStart).filter((entry) => entry.startsWith('done:甲')).length
+    const firstStartsBefore = order.slice(0, secondStart).filter((entry) => entry.startsWith('start:甲')).length
+    assert.equal(firstDoneBefore, firstStartsBefore, `the first message must finish first: ${order.join(' | ')}`)
+    assert.ok(firstDone >= 2, 'the long message really was chunked')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a caption and its file stay together in the queue', async () => {
+  const env = await setup({ config: { chunkChars: 200, chunkDelayMs: 0 } })
+  try {
+    const { writeFile, mkdtemp, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-wechat-outbox-'))
+    try {
+      const file = join(dir, 'artifact.txt')
+      await writeFile(file, 'hello')
+      const order = []
+      const original = env.client.sendText.bind(env.client)
+      env.client.sendText = async (request) => {
+        order.push(`text:${String(request.text).slice(0, 8)}`)
+        return original(request)
+      }
+      const originalSend = env.client.sendMessage.bind(env.client)
+      env.client.sendMessage = async (request) => {
+        order.push(`item:${request.item?.type}`)
+        return originalSend(request)
+      }
+      const caption = env.bridge.deliverFile('p2p:user@im.wechat', file, { caption: '产物在此' })
+      const other = env.bridge.deliver('p2p:user@im.wechat', '另一条消息')
+      await Promise.all([caption, other])
+      const captionIndex = order.findIndex((entry) => entry.includes('产物在此'))
+      const itemIndex = order.findIndex((entry) => entry.startsWith('item:'))
+      assert.ok(captionIndex >= 0 && itemIndex === captionIndex + 1, `caption then file, nothing between: ${order.join(' | ')}`)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  } finally {
+    await env.cleanup()
+  }
+})

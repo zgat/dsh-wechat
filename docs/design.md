@@ -95,6 +95,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - **段间间隔** `chunkDelayMs`（默认 350ms）：降低撞上发送限流的概率。
 - **输入状态**：回合开始 `sendtyping(START)`，每 `typingKeepaliveSeconds` 保活；投递结束后补一次 `STOP`（否则最后一条永远是 START，"正在输入"常驻）。
 - **心跳**：`progressHeartbeatSeconds`（默认 300，`0` 关闭）发一行 `🔄 仍在处理中…（已 X 分 Y 秒｜最后一步：<tool>）`；只对微信发起的回合；上限 12 条；回合结束、队列丢弃、超时、卸载都会停。`showToolProgress: false` 时心跳不带工具名（工具名与工具行共用同一个开关）。
+- **出站串行**：`#enqueueSend()` 为每个会话维护一条发送队列（与入站用的 `#chain` 分开——入站链内部会 `await deliver()`，共用一条链会自锁）。所有出站都经过它：回答分段、工具进度、心跳、`wechat_send_text`、`wechat_send_file`。`deliverFile(..., { caption })` 把说明与文件放进**同一个**排队任务，保证成对且连续。没有这条队列时，两次并发的发送会互相穿插（第二条的说明可能落在第一条分段中间）。
 - **上下文窗口（实测）**：主动推送依赖最近一次入站消息带来的 `context_token`。实测有效期约 15–30 分钟——+15 分 29 秒发送成功，+30 分 39 秒起返回 `ret=-2 (prepare failed)`，收到新消息刷新后 15 秒即恢复。因此超时策略是"提示用户冒泡 + 复活"，而不是无限期等待。
 
 ## 跟读（`/listen`）
@@ -182,7 +183,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 216 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 217 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |
