@@ -1901,9 +1901,9 @@ test('/status reports the preset a session runs', async () => {
     await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
     await waitFor(() => env.harness.agents.length === 1)
     await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 2 }))
-    await waitFor(() => env.client.sent.some((entry) => /状态：/.test(entry.text)))
-    const status = env.client.sent.map((entry) => entry.text).find((text) => /状态：/.test(text))
-    assert.match(status, /预设：standard/)
+    await waitFor(() => env.client.sent.some((entry) => /📊 状态/.test(entry.text)))
+    const status = env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text))
+    assert.match(status, /预设\s*│ standard/)
   } finally {
     await env.cleanup()
   }
@@ -2392,9 +2392,9 @@ test('/permission switches the mode and records it for the conversation', async 
 
     // /status then reports the new mode.
     await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 3 }))
-    await waitFor(() => env.client.sent.some((entry) => /状态：/.test(entry.text)))
-    const status = env.client.sent.map((entry) => entry.text).find((text) => /状态：/.test(text))
-    assert.match(status, /权限：read-only/)
+    await waitFor(() => env.client.sent.some((entry) => /📊 状态/.test(entry.text)))
+    const status = env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text))
+    assert.match(status, /权限\s*│ read-only/)
   } finally {
     await env.cleanup()
   }
@@ -2540,9 +2540,9 @@ test('/listen binds a session when the chat has none yet, and /status shows the 
     assert.ok(env.store.sessionFor('p2p:user@im.wechat'), 'following creates the binding it will follow')
 
     await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 2 }))
-    await waitFor(() => env.client.sent.some((entry) => /状态：/.test(entry.text)))
-    const status = env.client.sent.map((entry) => entry.text).find((text) => /状态：/.test(text))
-    assert.match(status, /接收其它客户端的回合：开/)
+    await waitFor(() => env.client.sent.some((entry) => /📊 状态/.test(entry.text)))
+    const status = env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text))
+    assert.match(status, /跟读\s*│ 开/)
   } finally {
     await env.cleanup()
   }
