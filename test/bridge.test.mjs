@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { InteractionRouter, parseApprovalReply, parseQuestionsReply } from '../lib/approval.js'
 import { WechatBridge, conversationKeyOf, userIdOf } from '../lib/bridge.js'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -3224,6 +3224,10 @@ test('a file the CDN refuses comes back with an actionable hint', async () => {
       },
     )
     assert.match(env.store.state.stats.lastError.message, /不是有效图片|改按文件发送/)
+    // Persisted too: a file send bypasses deliver()'s save, so the failure used to live only
+    // in memory and disappeared from /status after a restart.
+    const saved = JSON.parse(await readFile(join(env.dir, 'state.json'), 'utf8'))
+    assert.match(saved.stats.lastError.message, /不是有效图片|改按文件发送/, 'the failure reached disk')
   } finally {
     await env.cleanup()
   }
