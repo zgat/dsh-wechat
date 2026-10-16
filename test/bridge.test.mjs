@@ -1903,7 +1903,7 @@ test('/status reports the preset a session runs', async () => {
     await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 2 }))
     await waitFor(() => env.client.sent.some((entry) => /📊 状态/.test(entry.text)))
     const status = env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text))
-    assert.match(status, /预设\s*│ standard/)
+    assert.match(status, /\| 预设 \| standard \|/)
   } finally {
     await env.cleanup()
   }
@@ -2394,7 +2394,7 @@ test('/permission switches the mode and records it for the conversation', async 
     await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 3 }))
     await waitFor(() => env.client.sent.some((entry) => /📊 状态/.test(entry.text)))
     const status = env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text))
-    assert.match(status, /权限\s*│ read-only/)
+    assert.match(status, /\| 权限 \| read-only \|/)
   } finally {
     await env.cleanup()
   }
@@ -2542,7 +2542,7 @@ test('/listen binds a session when the chat has none yet, and /status shows the 
     await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 2 }))
     await waitFor(() => env.client.sent.some((entry) => /📊 状态/.test(entry.text)))
     const status = env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text))
-    assert.match(status, /跟读\s*│ 开/)
+    assert.match(status, /\| 跟读 \| 开/)
   } finally {
     await env.cleanup()
   }

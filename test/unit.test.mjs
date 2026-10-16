@@ -7,7 +7,7 @@ import { checkAccess, defaultConfig, normalizeConfig } from '../lib/config.js'
 import { formatQuestionsPrompt, parseQuestionsReply } from '../lib/approval.js'
 import { createCommands, parseCommand } from '../lib/commands.js'
 import { helpText } from '../lib/onboarding.js'
-import { briefValue, displayWidth, normalizeAnswer, padToWidth, redactText, renderTable, splitText, toolProgressLine, truncateToWidth } from '../lib/render.js'
+import { briefValue, normalizeAnswer, redactText, renderTable, splitText, toolProgressLine } from '../lib/render.js'
 import { WechatStore, dshHome, messageKey, resolvePaths } from '../lib/store.js'
 import { createTextUserMessage, latestAssistantText, newSessionId, service } from '../lib/harness.js'
 import { expandHome, isInsideDirectory, unquote } from '../lib/bridge.js'
@@ -695,34 +695,29 @@ test('a question answer is recognised by number, label or free text', () => {
   assert.match(card, /序号或选项文字/)
 })
 
-test('a table keeps its columns aligned in a monospaced chat', () => {
-  // Chinese takes two columns, so a naive padEnd() leaves a ragged right edge in WeChat.
-  assert.equal(displayWidth('连接'), 4)
-  assert.equal(displayWidth('DSH 会话'), 8)
-  assert.equal(padToWidth('连接', 8), '连接    ')
-  assert.equal(padToWidth('DSH 会话', 8), 'DSH 会话')
-  assert.equal(truncateToWidth('session-9478db4f-96f3-48b6-86e2-0ffb8924f301', 20), 'session-9478db4f-96…')
-
+test('a table is written as Markdown for the chat to render', () => {
   const table = renderTable(
     [
       ['连接', '已连接 · bot ba14a551405a@im.bot'],
-      ['微信会话', 'p2p:o9cq8091ekHUN3zPrCm_3nycn87Y@im.wechat'],
-      ['版本', '0.1.50（运行 = 已装）'],
+      ['DSH 会话', 'session-9478db4f-96f3-48b6-86e2-0ffb8924f301'],
+      ['版本', '0.1.51（运行 = 已装）'],
     ],
-    { title: '📊 状态', maxWidth: 50 },
+    { title: '📊 状态' },
   )
   const lines = table.split('\n')
   assert.equal(lines[0], '📊 状态')
-  const widths = lines.slice(1).map((line) => displayWidth(line))
-  assert.equal(new Set(widths).size, 1, `every row is one width: ${widths.join(',')}`)
-  assert.ok(widths[0] <= 50, 'the table fits a phone-width chat')
-  assert.match(table, /┌─+┬─+┐/)
-  assert.match(table, /└─+┴─+┘/)
-  assert.match(table, /…/, 'the long session id is truncated, not wrapped')
+  assert.equal(lines[1], '| 项目 | 值 |')
+  assert.equal(lines[2], '| --- | --- |')
+  assert.equal(lines.length, 6, 'header, separator and one row per pair')
+  assert.equal(lines[3], '| 连接 | 已连接 · bot ba14a551405a@im.bot |')
+  // Chinese needs no padding: the renderer aligns the cells.
+  assert.equal(lines[4], '| DSH 会话 | session-9478db4f-96f3-48b6-86e2-0ffb8924f301 |')
+  // A stray pipe or newline must not break the grid.
+  assert.equal(renderTable([['a|b', 'c\nd\ne']]), '| 项目 | 值 |\n| --- | --- |\n| a\\|b | c d e |')
   assert.equal(renderTable([]), '（无内容）')
 })
 
-test('/status answers with a table and keeps the long parts outside it', async () => {
+test('/status answers with a Markdown table and keeps the long parts outside it', async () => {
   const bridge = {
     describeConversation: async () => ({
       conversationKey: 'p2p:user@im.wechat',
@@ -736,8 +731,8 @@ test('/status answers with a table and keeps the long parts outside it', async (
       pendingInteractions: 1,
       connected: true,
       botId: 'bot-1@im.bot',
-      version: '0.1.50',
-      installedVersion: '0.1.51',
+      version: '0.1.51',
+      installedVersion: '0.1.52',
       stats: {
         inbound: 3,
         outbound: 4,
@@ -748,11 +743,15 @@ test('/status answers with a table and keeps the long parts outside it', async (
   const commands = createCommands(bridge)
   const reply = await commands.status('', { conversationKey: 'p2p:user@im.wechat', config: normalizeConfig({}) })
   const lines = reply.split('\n')
-  const tableLines = lines.filter((line) => /[│┌└]/.test(line))
-  assert.ok(tableLines.length >= 5, 'the status is drawn as a table')
-  const widths = new Set(tableLines.map((line) => displayWidth(line)))
-  assert.equal(widths.size, 1, `table rows share one width: ${[...widths].join(',')}`)
-  assert.match(reply, /运行中 2 · 交互待答 1/)
-  assert.match(reply, /0\.1\.50（已装 0\.1\.51，待重启）/)
+  assert.equal(lines[0], '📊 状态')
+  assert.equal(lines[1], '| 项目 | 值 |')
+  assert.equal(lines[2], '| --- | --- |')
+  const rows = lines.filter((line) => line.startsWith('| ') && !line.startsWith('| ---'))
+  assert.equal(rows.length, 12, `one row per fact: ${rows.length}`)
+  assert.match(reply, /\| 预设 \| standard \|/)
+  assert.match(reply, /\| 权限 \| workspace-write \|/)
+  assert.match(reply, /\| 跟读 \| 关（\/listen 打开） \|/)
+  assert.match(reply, /\| 回合 \| 运行中 2 · 交互待答 1 \|/)
+  assert.match(reply, /\| 版本 \| 0\.1\.51（已装 0\.1\.52，待重启） \|/)
   assert.match(reply, /⚠️ 最近错误（1 分钟前）：ret=-2 \(prepare failed\)/, 'the error stays readable below the table')
 })
