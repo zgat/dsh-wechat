@@ -222,3 +222,105 @@ test('closeRemoteDialogAfterAnswer: false leaves the other dialog alone', async 
   await new Promise((resolve) => setTimeout(resolve, 120))
   assert.equal(aborted, false, 'nothing was dispatched')
 })
+
+test('a pending question is announced as a question, not as an approval', async () => {
+  // The hint compared `record.kind === 'questions'` while #push() registers 'question',
+  // so a person answering a two-question card was told to reply 允许/拒绝 — an approval
+  // that did not exist.
+  const { router, sent } = makeRouter({ config: { questionsTimeoutSeconds: 30 } })
+  let otherCalls = 0
+  const pending = router.handleQuestions(
+    {
+      agent: { session: { id: 's1' } },
+      // Two questions: an incomplete reply is the case that must not be consumed.
+      questions: [
+        { id: 'q1', question: '选哪个？', options: [{ label: '甲' }, { label: '乙' }] },
+        { id: 'q2', question: '记录吗？', options: [{ label: '记' }, { label: '不记' }] },
+      ],
+    },
+    async () => {
+      otherCalls += 1
+      // Never answers: the other client not replying must leave the WeChat card live.
+      return new Promise(() => {})
+    },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '这是句普通的话'), false)
+  const hint = router.hintFor('p2p:user@im.wechat')
+  assert.match(hint, /提问还没回答/)
+  assert.equal(/允许|拒绝/.test(hint), false, 'a question never talks about approvals')
+  // The nudge is said once, and answering still works afterwards.
+  assert.equal(router.hintFor('p2p:user@im.wechat'), null)
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '甲'), true)
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '记'), true)
+  assert.deepEqual((await pending).answers, [
+    { id: 'q1', selected: ['甲'] },
+    { id: 'q2', selected: ['记'] },
+  ])
+  // The other client is offered the question too — that is how a two-surface race works —
+  // it simply never answers here.
+  assert.equal(otherCalls, 1)
+  assert.ok(sent.some((text) => /需要你的回答|选哪个/.test(text)))
+})
+
+test('a two-question card can be answered one question at a time', async () => {
+  // People answer chat questions in sequence: "1", then the next answer. Requiring both
+  // answers in one message meant the first reply did nothing at all.
+  const { router, sent } = makeRouter({ config: { questionsTimeoutSeconds: 30 } })
+  const questions = [
+    { id: 'a', question: '交付方式？', options: [{ label: '直接发到微信' }, { label: '只给本地路径' }] },
+    { id: 'b', question: '记录吗？', options: [{ label: '记进 design.md' }, { label: '不用记' }] },
+  ]
+  const pending = router.handleQuestions({ agent: { session: { id: 's1' } }, questions }, async () => new Promise(() => {}))
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  // First answer: acknowledged, not submitted, and it must not leak to the agent.
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '1'), true)
+  assert.ok(sent.some((text) => /已记录第 1 个回答，还剩 1 个/.test(text)), 'the person is told what is left')
+  assert.ok(sent.some((text) => /记录吗？/.test(text)), 'and what the next question is')
+
+  // An unrelated message must not be swallowed as the second answer.
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '等一下，我先看看'), false)
+
+  // Second answer completes the batch.
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '不用记'), true)
+  assert.deepEqual((await pending).answers, [
+    { id: 'a', selected: ['直接发到微信'] },
+    { id: 'b', selected: ['不用记'] },
+  ])
+})
+
+test('a two-question card also accepts every answer in one message', async () => {
+  const { router } = makeRouter({ config: { questionsTimeoutSeconds: 30 } })
+  const questions = [
+    { id: 'a', question: '交付方式？', options: [{ label: '直接发到微信' }, { label: '只给本地路径' }] },
+    { id: 'b', question: '记录吗？', options: [{ label: '记进 design.md' }, { label: '不用记' }] },
+  ]
+  for (const reply of ['1\n不用记', '1, 不用记', '直接发到微信 不用记']) {
+    const pending = router.handleQuestions({ agent: { session: { id: 's1' } }, questions }, async () => new Promise(() => {}))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(router.tryConsume('p2p:user@im.wechat', reply), true, `consumed: ${reply}`)
+    assert.deepEqual((await pending).answers, [
+      { id: 'a', selected: ['直接发到微信'] },
+      { id: 'b', selected: ['不用记'] },
+    ])
+  }
+})
+
+test('取消 hands a WeChat question back to the other client', async () => {
+  const { router, sent } = makeRouter({ config: { questionsTimeoutSeconds: 30 } })
+  let otherCalls = 0
+  const pending = router.handleQuestions(
+    { agent: { session: { id: 's1' } }, questions: [{ id: 'q1', question: '选哪个？', options: [{ label: '甲' }, { label: '乙' }] }] },
+    async () => {
+      otherCalls += 1
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return { answers: [{ id: 'q1', selected: ['乙'] }] }
+    },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '取消'), true)
+  assert.deepEqual((await pending).answers, [{ id: 'q1', selected: ['乙'] }], 'the other client decides')
+  assert.equal(otherCalls, 1)
+  assert.ok(sent.some((text) => /交回原来的客户端/.test(text)))
+})
