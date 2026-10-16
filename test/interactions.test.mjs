@@ -325,9 +325,40 @@ test('取消 hands a WeChat question back to the other client', async () => {
   assert.ok(sent.some((text) => /交回原来的客户端/.test(text)))
 })
 
-test('several answers at once and the rest later both work on one card', async () => {
-  // The two natural chat flows have to coexist: "answer all three", "answer one, then the
-  // next", and the mixture "answer two, then the last one".
+test('one message answers every question with newlines, commas or spaces', async () => {
+  const { router } = makeRouter({ config: { questionsTimeoutSeconds: 30 } })
+  const questions = [
+    { id: 'a', question: '交付方式？', options: [{ label: '直接发到微信' }, { label: '只给本地路径' }] },
+    { id: 'b', question: '长报告？', options: [{ label: '写成文件再发' }, { label: '直接在正文里发' }] },
+    { id: 'c', question: '记文档吗？', options: [{ label: '记进 design.md' }, { label: '不用记' }] },
+  ]
+  const byNumber = [
+    { id: 'a', selected: ['直接发到微信'] },
+    { id: 'b', selected: ['直接在正文里发'] },
+    { id: 'c', selected: ['不用记'] },
+  ]
+  const byLabel = [
+    { id: 'a', selected: ['直接发到微信'] },
+    { id: 'b', selected: ['写成文件再发'] },
+    { id: 'c', selected: ['不用记'] },
+  ]
+  const cases = [
+    ['1\n2\n2', byNumber],
+    ['1, 2, 2', byNumber],
+    ['1 2 2', byNumber],
+    ['直接发到微信, 写成文件再发, 不用记', byLabel],
+  ]
+  for (const [reply, expected] of cases) {
+    const pending = router.handleQuestions({ agent: { session: { id: 's1' } }, questions }, async () => new Promise(() => {}))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(router.tryConsume('p2p:user@im.wechat', reply), true, `consumed: ${JSON.stringify(reply)}`)
+    assert.deepEqual((await pending).answers, expected, `answers for: ${JSON.stringify(reply)}`)
+  }
+})
+
+test('a partial batch asks again instead of guessing, and one-at-a-time still finishes', async () => {
+  // "先答两个再答剩下的" was tried and dropped as too clever: a message either answers every
+  // question or exactly one of them.
   const { router, sent } = makeRouter({ config: { questionsTimeoutSeconds: 30 } })
   const questions = [
     { id: 'a', question: '交付方式？', options: [{ label: '直接发到微信' }, { label: '只给本地路径' }] },
@@ -335,22 +366,21 @@ test('several answers at once and the rest later both work on one card', async (
     { id: 'c', question: '记文档吗？', options: [{ label: '记进 design.md' }, { label: '不用记' }] },
   ]
   const pending = router.handleQuestions({ agent: { session: { id: 's1' } }, questions }, async () => new Promise(() => {}))
-  await new Promise((resolve) => setTimeout(resolve, 10))
-
-  // Two answers in one message: consumed, one question left, progress reported.
-  assert.equal(router.tryConsume('p2p:user@im.wechat', '1, 写成文件再发'), true, 'consumed as two answers')
   await new Promise((resolve) => setTimeout(resolve, 5))
-  assert.ok(
-    sent.some((text) => /已记录第 2 个回答，还剩 1 个/.test(text)),
-    `progress after two answers: ${sent.join(' | ').slice(0, 200)}`,
-  )
-  assert.ok(sent.some((text) => /记文档吗？/.test(text)), 'the remaining question is repeated')
 
-  // The last one later completes the batch.
+  // Two answers for three questions: ambiguous, so nothing is consumed.
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '1, 2'), false)
+  assert.equal(router.hintFor('p2p:user@im.wechat') !== null, true, 'the person is told the card is open')
+
+  // Answering one at a time still completes the batch.
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '1'), true)
+  assert.equal(router.tryConsume('p2p:user@im.wechat', '写成文件再发'), true)
   assert.equal(router.tryConsume('p2p:user@im.wechat', '2'), true)
   assert.deepEqual((await pending).answers, [
     { id: 'a', selected: ['直接发到微信'] },
     { id: 'b', selected: ['写成文件再发'] },
     { id: 'c', selected: ['不用记'] },
   ])
+  assert.ok(sent.some((text) => /已记录第 1 个回答，还剩 2 个/.test(text)))
+  assert.ok(sent.some((text) => /已记录第 2 个回答，还剩 1 个/.test(text)))
 })
