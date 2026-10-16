@@ -205,6 +205,8 @@ npm test          # 224 个用例：单元 + 协议 + 桥接 + 交互时序 + �
 开发依赖只有两个且都不参与运行时：`@deepseek-ai/cordis`（启动测试）、`qrcode`（二维码校验基准）。
 **测试不产生真实副作用**：`openInBrowser` 接受注入的 `spawn`/`platform`，测试注入假实现并断言 argv；非 http(s) 输入在 `spawn` 之前即被拒绝（历史教训：`openInBrowser('')` 会打开当前目录，每个测试都弹访达窗口）。
 
+**真机验证过的交互**：三问题卡片**逐条回答**——卡片 09:14:06 发出，09:15:01 回执「已记录第 1 个回答，还剩 2 个：<第 2 题>」，09:15:25 回执「已记录第 2 个回答，还剩 1 个：<第 3 题>」，第三次回答后整批提交；宿主收到三个答案**全部为 `selected`**（无一为 `custom`）。修复前同一场景：回复「1」会收到「回复『允许』或『拒绝』」的审批口吻提示，且逐条回答完全无效。
+
 **真机验证过的通道**：微信收发闭环（macOS + DSH 0.2.0-rc.2 桌面端）；**出站文件**——图片（`image_item`）与文件（`file_item`）各一次，AES 加密 → CDN 上传 → `sendmessage` 全链路成功；长任务心跳（实测 `已 5 分 0 秒` / `已 20 分 12 秒`）；双端竞速（GUI 先答 → 微信收到作废提示并自动关框）；审批「允许」真实放行。
 
 **一次性 profile 证据**：`scripts/verify-profile-install.sh`（安装/组合/卸载）与 `scripts/verify-profile-boot.sh`（真实 host 启动、探活插件路由、卸载回基线）在临时 `DSH_HOME` 上运行，结果记录在 [profile-verification.md](profile-verification.md)。
