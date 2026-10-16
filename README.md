@@ -177,7 +177,8 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | `media.enabled` | `true` | 是否收发图片/文件 |
 | `media.dir` | `stateDir/media` | 入站附件落盘目录 |
 | `media.maxInboundBytes` | `20971520` | 入站媒体上限，超出直接拒绝 |
-| `media.maxOutboundBytes` | `52428800` | 出站文件上限 |
+| `media.maxOutboundBytes` | `52428800` | 出站文件上限。**注意**：微信侧还有自己的单文件上限，超限的上传会在 CDN 上挂住而不是立刻报错；大文件建议压缩或改用链接 |
+| `media.uploadTimeoutMs` | `0` | 上传超时预算；`0` = 按体积自动（假设 ≥50KB/s，下限 120 秒、上限 15 分钟）。33MB 约 12.7 分钟；上行慢就调大 |
 | `notifyLifecycle` | `false` | 是否发送 `msg/notifystart\|notifystop`（非公开协议，失败忽略） |
 | `routeTag` | `null` | `SKRouteTag` 路由标签，仅部署方需要时填写 |
 | `channelVersion` | `1.0.0` | `base_info.channel_version` |
@@ -247,7 +248,8 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 反复 `接收消息失败（第 N 次）` | 网络到不了 `ilinkai.weixin.qq.com`：`curl -I https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3` 验证 |
 | `微信会话已过期（ret=-14）` | 插件会清凭据并重新扫码；也可先 `logout` 再 `login` |
 | `no context_token cached` / 主动推送报 `ret=-2 (prepare failed)` | 距该会话最后发言超过约 15–30 分钟：让对方先发一条消息即可恢复 |
-| 长回答丢段 / 「有 N 段未能发出」 | 看 `/status` 最近错误原文（含原因与相对时间）；先回一句话刷新上下文，插件会补发失败分段 |
+| 长回答丢段 / 「有 N 段未能发出」 | 微信平台限制：**同一窗口最多连发 10 条**，超出的会被拒（`ret=-2 prepare failed`），**在微信里回任意一句话即可解锁**；插件已退避重试 + 整轮补发，仍失败会告警。看 `/status` 最近错误原文 |
+| 大文件发送失败（`CDN upload timed out`） | 客户端按体积给了预算（33MB ≈ 12.7 分钟），若仍超时说明上行太慢或**撞上微信单文件上限**（超限时 CDN 会挂住而不是报错）；压缩/分卷，或用 `media.uploadTimeoutMs` 调大预算 |
 | 长任务很久没动静 | 微信发任意一句话（或 `/listen`）让那一轮复活；`/status` 看队列与运行状态 |
 | 审批/提问在微信没出现 | 该轮不是微信发起的（默认不打扰）；开 `/listen`，或直接在 GUI 回答 |
 | 审批框「允许」没生效（≤0.1.33） | 0.1.34+ 已修（请求挂起时不再 abort 宿主信号）；`/status` 确认运行版本 |

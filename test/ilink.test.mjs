@@ -40,6 +40,8 @@ async function startFakeIlink(options = {}) {
     requests: [],
     media: options.media ?? Buffer.from('CDN 上的原始字节', 'utf8'),
     expiresAt: options.expiresAt ?? null,
+    // When set, getuploadurl answers with a pre-signed full URL as well.
+    uploadFullUrl: options.uploadFullUrl ?? false,
   }
 
   const server = createServer((request, response) => {
@@ -113,7 +115,20 @@ async function startFakeIlink(options = {}) {
       if (url.pathname === '/ilink/bot/getuploadurl') {
         const body = JSON.parse(raw.toString('utf8'))
         state.uploaded = body
-        json({ upload_param: 'upload-param-1', thumb_upload_param: '' })
+        json({
+          upload_param: 'upload-param-1',
+          // Some deployments answer with a pre-signed full URL instead; the client must
+          // prefer it over its own CDN construction.
+          ...(state.uploadFullUrl ? { upload_full_url: `${baseUrl}/c2c/presigned?slot=abc` } : {}),
+          thumb_upload_param: '',
+        })
+        return
+      }
+      if (url.pathname === '/c2c/presigned') {
+        state.presignedUploads = (state.presignedUploads ?? 0) + 1
+        state.uploadedCiphertext = raw
+        response.writeHead(200, { 'x-encrypted-param': 'encrypted-param-presigned' })
+        response.end('')
         return
       }
       if (url.pathname === '/c2c/upload') {
@@ -578,4 +593,31 @@ test('a dead status endpoint makes the login fetch a fresh QR instead of polling
   assert.equal(result, null, 'the login gives up instead of hanging')
   assert.ok(statusCalls <= 10, `it stopped after a bounded number of attempts (${statusCalls})`)
   assert.ok(Date.now() - started < 30_000, 'and it did not wait out a long retry loop')
+})
+
+test('an upload uses the pre-signed full URL when the gateway offers one', async () => {
+  const gateway = await startFakeIlink({ uploadFullUrl: true })
+  const temp = await createTempStore()
+  try {
+    const client = new ILinkClient({ baseUrl: gateway.baseUrl, cdnBaseUrl: gateway.cdnBaseUrl, token: 'tok-1' })
+    const filePath = join(temp.dir, 'artifact.bin')
+    await writeFile(filePath, Buffer.from('presigned payload', 'utf8'))
+    const result = await uploadLocalFile({ client, filePath, toUserId: 'user@im.wechat' })
+    assert.equal(gateway.state.presignedUploads, 1, 'uploaded to the pre-signed URL')
+    const media = result.item.file_item.media
+    assert.equal(media.encrypt_query_param, 'encrypted-param-presigned')
+  } finally {
+    await temp.cleanup()
+    await gateway.close()
+  }
+})
+
+test('the upload timeout scales with the payload instead of a fixed 120s', async () => {
+  // A 33MB file on a slow uplink needs minutes; a fixed six-times-request timeout cut it
+  // off mid-upload and reported "CDN upload timed out".
+  const { uploadTimeoutMs } = await import('../lib/ilink/api.js')
+  assert.equal(uploadTimeoutMs(200 * 1024, 20_000), 120_000, 'small files keep the floor')
+  assert.ok(uploadTimeoutMs(33.4 * 1024 * 1024, 20_000) > 600_000, '33MB gets more than ten minutes')
+  assert.equal(uploadTimeoutMs(400 * 1024 * 1024, 20_000), 15 * 60_000, 'capped at fifteen minutes')
+  assert.equal(uploadTimeoutMs(33.4 * 1024 * 1024, 20_000, 600_000), 600_000, 'explicit override wins')
 })
