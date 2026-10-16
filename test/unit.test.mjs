@@ -788,6 +788,12 @@ test('the last error is labelled as stale when it predates this run', () => {
   })
   assert.match(stale, /13 小时前，\*\*上次运行\*\*/)
 
+  // A message that already carries a hint is not given a second, possibly contradictory one.
+  const preHinted = describeLastError({
+    stats: { lastError: { at: new Date().toISOString(), message: '文件发送失败：HTTP 500 💡 改按文件发送' } },
+  })
+  assert.equal((preHinted.match(/💡/g) ?? []).length, 1, 'exactly one hint')
+
   assert.equal(describeLastError({ stats: {} }), null)
   assert.equal(describeLastError({}), null)
   // No known pattern: the message is shown, without an invented hint.

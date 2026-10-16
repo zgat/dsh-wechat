@@ -3223,11 +3223,13 @@ test('a file the CDN refuses comes back with an actionable hint', async () => {
         return true
       },
     )
-    assert.match(env.store.state.stats.lastError.message, /不是有效图片|改按文件发送/)
+    // The stored message stays raw; the hint is added when it is displayed.
+    assert.match(env.store.state.stats.lastError.message, /HTTP 500/)
+    assert.equal(/💡/.test(env.store.state.stats.lastError.message), false, 'no hint baked into the state')
     // Persisted too: a file send bypasses deliver()'s save, so the failure used to live only
     // in memory and disappeared from /status after a restart.
     const saved = JSON.parse(await readFile(join(env.dir, 'state.json'), 'utf8'))
-    assert.match(saved.stats.lastError.message, /不是有效图片|改按文件发送/, 'the failure reached disk')
+    assert.match(saved.stats.lastError.message, /HTTP 500/, 'the failure reached disk')
   } finally {
     await env.cleanup()
   }
