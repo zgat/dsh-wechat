@@ -3177,3 +3177,54 @@ test('a caption and its file stay together in the queue', async () => {
     await env.cleanup()
   }
 })
+
+test('the undeliverable notice explains how to unlock the send window', async () => {
+  // ret=-2 means the platform window is full (or the push context expired). Both are cured by
+  // the person writing again, so the notice has to say that instead of only counting the loss.
+  const env = await setup({ config: { sendRetryMs: [1, 1], chunkDelayMs: 0 } })
+  try {
+    const original = env.client.sendText.bind(env.client)
+    env.client.sendText = async (request) => {
+      // The answer itself never makes it; the notice that follows does, so the test can read
+      // what the person would have seen.
+      if (/^⚠️/.test(String(request.text))) return original(request)
+      const error = new Error('ilink: POST /ilink/bot/sendmessage failed with ret=-2 (prepare failed)')
+      error.ret = -2
+      throw error
+    }
+    const sent = await env.bridge.deliver('p2p:user@im.wechat', '这条发不出去')
+    assert.equal(sent, 0)
+    const notice = env.client.sent.map((entry) => entry.text).find((text) => /未能发出/.test(text))
+    assert.ok(notice, 'the person is told something was lost')
+    assert.match(notice, /💡/, 'and how to fix it')
+    assert.match(notice, /回任意一句话即可解锁|最多连发 10 条/)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a file the CDN refuses comes back with an actionable hint', async () => {
+  const env = await setup()
+  try {
+    const { writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const fakeImage = join(tmpdir(), `fake-${Date.now()}.png`)
+    await writeFile(fakeImage, 'this is not a png')
+    env.client.uploadCdn = async () => {
+      throw new Error('ilink: CDN upload failed with HTTP 500')
+    }
+    env.client.getUploadUrl = async () => ({ uploadParam: 'p', uploadFullUrl: '', thumbUploadParam: '' })
+    await assert.rejects(
+      () => env.bridge.deliverFile('p2p:user@im.wechat', fakeImage),
+      (error) => {
+        assert.match(error.message, /HTTP 500/, 'the original detail is kept')
+        assert.match(error.message, /不是有效图片|改按文件发送/, 'and the next step is named')
+        return true
+      },
+    )
+    assert.match(env.store.state.stats.lastError.message, /不是有效图片|改按文件发送/)
+  } finally {
+    await env.cleanup()
+  }
+})

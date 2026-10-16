@@ -5,9 +5,9 @@ import { join } from 'node:path'
 
 import { checkAccess, defaultConfig, normalizeConfig } from '../lib/config.js'
 import { formatQuestionsPrompt, parseQuestionsReply } from '../lib/approval.js'
-import { createCommands, parseCommand } from '../lib/commands.js'
+import { createCommands, describeLastError, parseCommand } from '../lib/commands.js'
 import { helpText } from '../lib/onboarding.js'
-import { briefValue, normalizeAnswer, redactText, renderTable, splitText, toolProgressLine } from '../lib/render.js'
+import { briefValue, explainFailure, normalizeAnswer, redactText, renderTable, splitText, toolProgressLine } from '../lib/render.js'
 import { WechatStore, dshHome, messageKey, resolvePaths } from '../lib/store.js'
 import { createTextUserMessage, latestAssistantText, newSessionId, service } from '../lib/harness.js'
 import { expandHome, isInsideDirectory, unquote } from '../lib/bridge.js'
@@ -754,4 +754,43 @@ test('/status answers with a Markdown table and keeps the long parts outside it'
   assert.match(reply, /\| 回合 \| 运行中 2 · 交互待答 1 \|/)
   assert.match(reply, /\| 版本 \| 0\.1\.51（已装 0\.1\.52，待重启） \|/)
   assert.match(reply, /⚠️ 最近错误（1 分钟前）：ret=-2 \(prepare failed\)/, 'the error stays readable below the table')
+})
+
+test('a transport failure is explained in the reader\'s terms', () => {
+  // Codes alone leave the reader (or the model asked to retry) with nothing to do.
+  assert.match(explainFailure('ilink: CDN upload failed with HTTP 500', 'image'), /不是有效图片/)
+  assert.match(explainFailure('ilink: CDN upload failed with HTTP 500', 'image'), /改按文件发送/)
+  assert.match(explainFailure('ilink: CDN upload failed with HTTP 500', 'file'), /损坏或格式不被接受/)
+  assert.match(explainFailure('ilink: CDN upload timed out after 761s (33.4MB)'), /上行带宽较慢/)
+  assert.match(explainFailure('ilink: POST /ilink/bot/sendmessage failed with ret=-2 (prepare failed)'), /最多连发 10 条/)
+  assert.match(explainFailure('ret=-2 (prepare failed)'), /回任意一句话即可解锁/)
+  assert.match(explainFailure('no context_token cached for x'), /先发一句话/)
+  assert.match(explainFailure('ilink: session expired (ret=-14)'), /重新扫码/)
+  assert.match(explainFailure('fetch failed'), /网络中断/)
+  assert.equal(explainFailure('something else entirely'), '')
+  assert.equal(explainFailure(undefined), '')
+})
+
+test('the last error is labelled as stale when it predates this run', () => {
+  const now = Date.now()
+  const startedAt = new Date(now - 600_000).toISOString()
+  const fresh = describeLastError({
+    startedAt,
+    stats: { lastError: { at: new Date(now - 60_000).toISOString(), message: 'ret=-2 (prepare failed)' } },
+  })
+  assert.match(fresh, /最近错误（1 分钟前）：ret=-2/)
+  assert.equal(/上次运行/.test(fresh), false, 'a fresh error is not labelled stale')
+  assert.match(fresh, /💡 .*最多连发 10 条/, 'and it carries the hint')
+
+  const stale = describeLastError({
+    startedAt,
+    stats: { lastError: { at: new Date(now - 13 * 3600_000).toISOString(), message: 'CDN upload timed out' } },
+  })
+  assert.match(stale, /13 小时前，\*\*上次运行\*\*/)
+
+  assert.equal(describeLastError({ stats: {} }), null)
+  assert.equal(describeLastError({}), null)
+  // No known pattern: the message is shown, without an invented hint.
+  const bare = describeLastError({ stats: { lastError: { at: new Date().toISOString(), message: 'weird' } } })
+  assert.equal(/💡/.test(bare), false)
 })
