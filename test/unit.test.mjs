@@ -788,6 +788,17 @@ test('the last error is labelled as stale when it predates this run', () => {
   })
   assert.match(stale, /13 小时前，\*\*上次运行\*\*/)
 
+  // The stored marker picks the right remedy: an image failure must not be explained as a
+  // corrupt file ("检查文件格式") when the answer is "send it as a file instead".
+  const imageFailure = describeLastError({
+    stats: { lastError: { at: new Date().toISOString(), message: '文件发送失败（按图片）：HTTP 500' } },
+  })
+  assert.match(imageFailure, /不是有效图片|改按文件发送/)
+  const fileFailure = describeLastError({
+    stats: { lastError: { at: new Date().toISOString(), message: '文件发送失败（按文件）：HTTP 500' } },
+  })
+  assert.match(fileFailure, /损坏或格式不被接受/)
+
   // A message that already carries a hint is not given a second, possibly contradictory one.
   const preHinted = describeLastError({
     stats: { lastError: { at: new Date().toISOString(), message: '文件发送失败：HTTP 500 💡 改按文件发送' } },

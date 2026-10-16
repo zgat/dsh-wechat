@@ -3223,8 +3223,8 @@ test('a file the CDN refuses comes back with an actionable hint', async () => {
         return true
       },
     )
-    // The stored message stays raw; the hint is added when it is displayed.
-    assert.match(env.store.state.stats.lastError.message, /HTTP 500/)
+    // The stored message stays raw (plus how it was sent); the hint is added when displayed.
+    assert.match(env.store.state.stats.lastError.message, /文件发送失败（按图片）：.*HTTP 500/)
     assert.equal(/💡/.test(env.store.state.stats.lastError.message), false, 'no hint baked into the state')
     // Persisted too: a file send bypasses deliver()'s save, so the failure used to live only
     // in memory and disappeared from /status after a restart.
