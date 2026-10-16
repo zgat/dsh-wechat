@@ -77,7 +77,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 图片 / 文件 | 入站图片/文件/语音/视频解密落盘并把路径交给 Agent；Agent 可用工具把产物发回 |
 | 模型工具 | `wechat_send_text`、`wechat_send_file`、`wechat_chat_info` |
 | 访问控制 | 默认白名单 + 所有者模型；非所有者不能改权限、不能清凭据 |
-| 长任务可见 | 「对方正在输入」+ 工具进度行 + 每 5 分钟一次心跳（只对微信发起的回合） |
+| 长任务可见 | 「对方正在输入」+ 工具进度行（`progress: brief`）；**没有心跳**——微信同一窗口最多连发 10 条，心跳会跟真正的回复抢额度，长任务用 `/status` 查进度 |
 | 渠道提示词 | 自动告诉模型「这个会话在微信里」：最终回答会自动送达、交付文件用 `wechat_send_file`、长内容先落盘再发——避免它把产物只写到磁盘上（只注入本插件创建的会话） |
 | 断线自愈 | 长轮询退避重试且不丢游标；`ret=-14` 自动清凭据并重新扫码；登录失败 60 秒重试 |
 
@@ -168,7 +168,6 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | `progress` | `brief` | `off` 只回最终答案；`brief` 加工具进度；`verbose` 再加中间说明 |
 | `showToolProgress` | `true` | `progress != off` 时是否推送 `🔧 tool` 行（关掉只影响通知，不影响工具可用） |
 | `turnTimeoutSeconds` | `900` | 单轮最长等待；超时后发提示（回合继续在后台跑），提示会请用户回一句话或发 `/listen`（见「超时与节奏」） |
-| `progressHeartbeatSeconds` | `300` | 回合运行中每隔这么久发一行 `🔄 仍在处理中…（已 X 分 Y 秒｜最后一步：bash）`；`0` 关闭；只对微信发起的回合生效，每轮上限 12 条 |
 | `approvalTimeoutSeconds` | `300` | 审批卡有效期；超时把决策交回另一端 |
 | `questionsTimeoutSeconds` | `600` | 提问卡有效期；超时同上 |
 | `idleDisposeMinutes` | `0` | 安静这么多分钟后释放常驻 Agent（绑定保留，下条消息自动 resume）；`0` = 常驻，可写小数 |
@@ -198,7 +197,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 7. **命令不消耗模型额度**：斜杠命令在进入 Agent 之前处理；`/session` 切换只重绑会话，不新建也不截断历史。
 8. **群聊不支持**：iLink 的群消息没有可靠的回复路由，收到即忽略（debug 日志记一条）。
 9. **多联系人相互独立**：每个微信联系人各自独立的会话与上下文。
-10. **出站按会话串行**：同一会话的发送（回答分段、工具进度、心跳、`wechat_send_text`、`wechat_send_file` 及其说明文字）排成一条队列，**不会交错**；"说明 + 文件"作为一次排队发送，中间不会插进别的消息。
+10. **出站按会话串行**：同一会话的发送（回答分段、工具进度、`wechat_send_text`、`wechat_send_file` 及其说明文字）排成一条队列，**不会交错**；"说明 + 文件"作为一次排队发送，中间不会插进别的消息。
 11. **渠道提示词**：本插件创建的会话会注入一段「微信渠道」说明（`dsh-wechat:channel`，order 10150），告诉模型回答会自动送达、交付文件用 `wechat_send_file`；GUI 自己开的会话不受影响。
 
 ## 超时与节奏（默认值速查）
@@ -206,7 +205,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 项 | 默认 | 行为 |
 | --- | --- | --- |
 | 单轮等待 | 900s（15 分钟） | 超时发提示（回合继续跑）；用户回话即"复活"，答案随后补发 |
-| 心跳 | 300s（5 分钟） | 长任务不静默；只对微信发起的回合；每轮上限 12 条 |
+| 平台发送额度 | 同一窗口 10 条 | 超出被拒（`ret=-2`）；**用户在微信发任意一句话即可解锁**（`/status` 最划算：解锁 + 拿到状态，且不花模型额度） |
 | 审批卡 | 300s（5 分钟） | 超时只撤微信卡，决策权交回另一端 |
 | 提问卡 | 600s（10 分钟） | 同上 |
 | 上下文窗口 | 约 15–30 分钟 | 到期后主动推送报 `ret=-2 (prepare failed)`；需该会话先有新消息 |
@@ -248,7 +247,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 反复 `接收消息失败（第 N 次）` | 网络到不了 `ilinkai.weixin.qq.com`：`curl -I https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3` 验证 |
 | `微信会话已过期（ret=-14）` | 插件会清凭据并重新扫码；也可先 `logout` 再 `login` |
 | `no context_token cached` / 主动推送报 `ret=-2 (prepare failed)` | 距该会话最后发言超过约 15–30 分钟：让对方先发一条消息即可恢复 |
-| 长回答丢段 / 「有 N 段未能发出」 | 微信平台限制：**同一窗口最多连发 10 条**，超出的会被拒（`ret=-2 prepare failed`），**在微信里回任意一句话即可解锁**；插件已退避重试 + 整轮补发，仍失败会告警。看 `/status` 最近错误原文 |
+| 长回答丢段 / 「有 N 段未能发出」 | 微信平台限制：**同一窗口最多连发 10 条**，超出的会被拒（`ret=-2 prepare failed`），**在微信里回任意一句话即可解锁**（推荐 `/status`：顺带看状态、不花额度）；插件已退避重试 + 整轮补发，仍失败会告警。看 `/status` 最近错误原文 |
 | 大文件发送失败（`CDN upload timed out`） | 客户端按体积给了预算（33MB ≈ 12.7 分钟），若仍超时说明上行太慢或**撞上微信单文件上限**（超限时 CDN 会挂住而不是报错）；压缩/分卷，或用 `media.uploadTimeoutMs` 调大预算 |
 | 长任务很久没动静 | 微信发任意一句话（或 `/listen`）让那一轮复活；`/status` 看队列与运行状态 |
 | 审批/提问在微信没出现 | 该轮不是微信发起的（默认不打扰）；开 `/listen`，或直接在 GUI 回答 |
