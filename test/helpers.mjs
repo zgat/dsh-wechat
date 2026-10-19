@@ -395,7 +395,9 @@ export async function waitFor(predicate, { timeoutMs = 2_000, intervalMs = 5, la
 export { decryptAesEcb, encryptAesEcb, encodeAesKey }
 
 /** A fake iLink gateway that hands out one message and records every reply. */
-export async function startGateway() {
+export async function startGateway(options = {}) {
+  const qrBotId = options.qrBotId ?? 'bot-qr@im.bot'
+  const qrToken = options.qrToken ?? 'token-from-qr'
   const state = { updates: [], sent: [], polls: 0, typing: [], uploads: [], qrPhase: 'wait', qrIssued: 0 }
   const server = createServer((request, response) => {
     const chunks = []
@@ -413,7 +415,7 @@ export async function startGateway() {
       }
       if (url.pathname === '/ilink/bot/get_qrcode_status') {
         if (state.qrPhase === 'confirmed') {
-          send({ status: 'confirmed', bot_token: 'token-from-qr', ilink_bot_id: 'bot-qr@im.bot', ilink_user_id: 'owner@im.wechat', baseurl: state.baseUrl })
+          send({ status: 'confirmed', bot_token: qrToken, ilink_bot_id: qrBotId, ilink_user_id: 'owner@im.wechat', baseurl: state.baseUrl })
           return
         }
         send({ status: state.qrPhase })

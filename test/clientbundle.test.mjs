@@ -117,3 +117,66 @@ test('the card maps every host status onto a label and a tone', async () => {
   assert.equal(describe({}).label, '未绑定')
   assert.equal(describe({ hasQr: false }).canRefresh, false, 'no refresh button without a code')
 })
+
+test('the rendered card lists every bot and offers «添加绑定»', async () => {
+  const { exports } = await loadClientModule()
+
+  // A stubbed react: the first useState holds the host status, the rest keep their
+  // initial values (busy / notice). That is enough to render the card once, which is the
+  // only part a browser adds over the mapping tests.
+  let hooks = 0
+  const createElement = (type, props, ...children) => ({ type, props: props ?? {}, children })
+  const react = {
+    createElement,
+    useState: (initial) => [hooks++ === 0 ? {
+      bots: [
+        { botId: 'a@im.bot', connected: true, ownerUserId: 'owner@im.wechat' },
+        { botId: 'b@im.bot', connected: false },
+      ],
+      adding: false,
+      hasQr: false,
+      qrUrl: null,
+      pageUrl: '/dsh-wechat/?t=tok',
+      version: '0.2.2',
+      lastError: null,
+    } : initial, () => {}],
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+  }
+
+  // The ES module body already ran in an earlier test: reuse its factory with this stub.
+  const { loaded } = await loadClientModule()
+  const instance = loaded.factory(() => react)
+
+  let section = null
+  instance.apply({ slots: { inject: (name, factory) => factory(), register: (meta, component) => { section = component } } })
+  const tree = section()
+
+  // Walk the element tree for strings and button labels.
+  const texts = []
+  const buttons = []
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node === 'boolean') return
+    if (typeof node === 'string' || typeof node === 'number') {
+      texts.push(String(node))
+      return
+    }
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child)
+      return
+    }
+    if (node.type === 'button') {
+      buttons.push(...node.children.filter((child) => typeof child === 'string'))
+    }
+    for (const child of node.children) walk(child)
+  }
+  walk(tree)
+
+  assert.ok(texts.includes('a@im.bot'), 'bot A is listed')
+  assert.ok(texts.includes('b@im.bot'), 'bot B is listed')
+  assert.ok(texts.includes('在线'), 'online bots get a badge')
+  assert.ok(texts.includes('离线'), 'offline bots get one too')
+  assert.ok(texts.includes('已连接 1/2'), 'the header counts the online bots')
+  assert.ok(buttons.includes('添加绑定'), 'the add action is offered')
+  assert.ok(!buttons.includes('刷新二维码'), 'no refresh without a pending code')
+})

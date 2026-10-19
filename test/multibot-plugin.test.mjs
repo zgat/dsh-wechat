@@ -215,3 +215,94 @@ test('adding a bot at runtime leaves the running bot polling', async () => {
     await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }
 })
+
+test('re-scanning an already running bot replaces its channel and token', async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-rebind-'))
+  const gA = await startGateway()
+  // This gateway hands back the *same* bot id with a fresh token.
+  const gLogin = await startGateway({ qrBotId: 'bot-a@im.bot', qrToken: 'token-rebound' })
+  await writeFile(
+    path.join(stateDir, 'credentials.json'),
+    JSON.stringify({
+      version: 2,
+      bots: { 'bot-a@im.bot': { version: 1, botToken: 'token-old', botId: 'bot-a@im.bot', baseUrl: gA.baseUrl, source: 'file' } },
+    }),
+  )
+
+  const root = new Context()
+  const ctx = root.isolate?.() ?? root
+  const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
+  ctx.provide('agents', harness.registry)
+  ctx.provide('sessions', { list: () => [], get: () => undefined })
+  ctx.provide('tools', { register: () => () => {} })
+  const routes = []
+  ctx.provide('webServer', {
+    port: 0,
+    register(route) {
+      routes.push(route)
+      return () => {}
+    },
+  })
+
+  const fiber = ctx.plugin(plugin, {
+    stateDir,
+    accessPolicy: 'open',
+    typing: false,
+    progress: 'off',
+    logLevel: 'silent',
+    loginPage: true,
+    loginPagePort: 0,
+    autoLogin: false,
+    baseUrl: gLogin.baseUrl,
+  })
+
+  const call = async (target, options = {}) =>
+    new Promise((resolve) => {
+      const response = {
+        statusCode: null,
+        headers: null,
+        body: '',
+        writeHead(status, headers) {
+          this.statusCode = status
+          this.headers = headers
+        },
+        end(body) {
+          this.body = body ?? ''
+          resolve(this)
+        },
+      }
+      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+    })
+
+  try {
+    await waitFor(() => gA.state.polls > 0 && routes.length === 1, { timeoutMs: 8_000, label: 'bot A polling' })
+
+    const add = await call('/dsh-wechat/api/add', { method: 'POST' })
+    assert.equal(add.statusCode, 200)
+    await waitFor(() => gLogin.state.qrIssued > 0, { timeoutMs: 8_000, label: 'qr issued' })
+    gLogin.state.qrPhase = 'confirmed'
+
+    // The bound credential now carries the token from the scan…
+    const onDisk = await waitFor(
+      async () => {
+        const raw = JSON.parse(await readFile(path.join(stateDir, 'credentials.json'), 'utf8'))
+        return raw.bots?.['bot-a@im.bot']?.botToken === 'token-rebound' ? raw : null
+      },
+      { timeoutMs: 8_000, label: 'credential rebound' },
+    )
+    assert.ok(onDisk.bots['bot-a@im.bot'], 'the bot stayed bound')
+    assert.equal(Object.keys(onDisk.bots).length, 1, 're-binding does not duplicate the bot')
+
+    // …and the replacement channel polls the gateway that issued it.
+    await waitFor(() => gLogin.state.polls > 0, { timeoutMs: 8_000, label: 'rebound channel polls' })
+  } finally {
+    try {
+      await fiber?.dispose?.()
+    } catch {
+      // Assertions above own the failures.
+    }
+    await gA.close()
+    await gLogin.close()
+    await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})
