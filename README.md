@@ -99,6 +99,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 - **投递**：回复永远走**收到这条消息的那只 bot**，不会用别的 bot 的凭据发送。
 - **移除**：在对应 bot 的聊天里发 `/logout`（只解绑那一只）；`/logout all` 解绑全部。解绑后该 bot 的长轮询要等重启 DSH 才停。
 - **迁移**：旧的单 bot 状态在启动时自动迁移（凭据改成 `{version:2,bots:{…}}`，会话键补上 bot id），已有会话绑定不变。
+- **超时**：一次「添加绑定」默认 **300 秒**内没扫码就取消（`loginTimeoutSeconds` 可调），并把原因记进**错误日志**，卡片不会一直停在「添加中…」。
 
 CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与长轮询游标。
 

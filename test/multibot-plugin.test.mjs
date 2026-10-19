@@ -306,3 +306,77 @@ test('re-scanning an already running bot replaces its channel and token', async 
     await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }
 })
+
+test('a login nobody completes times out, says so, and frees the add button', async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-logintimeout-'))
+  const gLogin = await startGateway()
+  await writeFile(path.join(stateDir, 'credentials.json'), JSON.stringify({ version: 2, bots: {} }))
+
+  const root = new Context()
+  const ctx = root.isolate?.() ?? root
+  const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
+  ctx.provide('agents', harness.registry)
+  ctx.provide('sessions', { list: () => [], get: () => undefined })
+  ctx.provide('tools', { register: () => () => {} })
+  const routes = []
+  ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
+
+  const fiber = ctx.plugin(plugin, {
+    stateDir,
+    accessPolicy: 'open',
+    typing: false,
+    progress: 'off',
+    logLevel: 'silent',
+    loginPage: true,
+    loginPagePort: 0,
+    autoLogin: false,
+    baseUrl: gLogin.baseUrl,
+    // Short enough for a test, long enough for the QR request to land.
+    loginTimeoutSeconds: 1,
+  })
+
+  const call = async (target, options = {}) =>
+    new Promise((resolve) => {
+      const response = {
+        statusCode: null,
+        headers: null,
+        body: '',
+        writeHead(status, headers) { this.statusCode = status; this.headers = headers },
+        end(body) { this.body = body ?? ''; resolve(this) },
+      }
+      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+    })
+
+  try {
+    await waitFor(() => routes.length === 1, { timeoutMs: 8_000, label: 'route' })
+    const add = await call('/dsh-wechat/api/add', { method: 'POST' })
+    assert.equal(add.statusCode, 200)
+
+    // The gateway is left on "wait": nobody scans, so the deadline must end the attempt.
+    const settled = await waitFor(
+      async () => {
+        const status = await call('/dsh-wechat/api/status')
+        const body = JSON.parse(status.body)
+        return body.adding === false && body.phase === 'failed' ? body : null
+      },
+      { timeoutMs: 10_000, label: 'login timed out' },
+    )
+    assert.ok(settled.errorCount >= 1, 'the failure reached the error log')
+    const errors = JSON.parse((await call('/dsh-wechat/api/errors')).body)
+    assert.ok(
+      errors.entries.some((entry) => /添加 bot 未完成|添加 bot 失败/.test(entry.message)),
+      'the log names the aborted sign-in',
+    )
+    // The button is usable again: a second attempt is accepted rather than answered 409.
+    const again = await call('/dsh-wechat/api/add', { method: 'POST' })
+    assert.equal(again.statusCode, 200)
+  } finally {
+    try {
+      await fiber?.dispose?.()
+    } catch {
+      // Assertions above own the failures.
+    }
+    await gLogin.close()
+    await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})
