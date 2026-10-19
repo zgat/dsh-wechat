@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat",
-  "version": "0.1.56",
+  "version": "0.1.57",
   "description": "把 DeepSeek Harness 接进微信：扫码绑定后在微信里派活、收结果、回审批（iLink/ClawBot 协议）",
   "keywords": [
     "dsh",
@@ -20,6 +20,7 @@
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "bin": {
@@ -40,6 +41,13 @@
       "patch": "./cordis.patch.yml"
     },
     "pluginType": "feature",
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    },
     "compatibility": {
       "dsh": ">=0.2.0-rc.2 <0.3.0",
       "dshReleases": {

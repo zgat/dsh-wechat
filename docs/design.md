@@ -141,6 +141,15 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 ⚠️ 我们曾把 `ret=-2` 归因于"上下文约 15–30 分钟过期"（实测：+15 分 29 秒成功、+30 分 39 秒起失败、用户发言后 15 秒恢复）。**这个结论可能被"10 条/窗口"混淆**：那段时间我们连续发了 9~10 条（跟读推送 + 测试）。两者都以"用户再发一条"解除，需要用「少量发送 + 长间隔」和「同刻连发 12 条」两个实验区分，尚未定论。
 
+## 客户端半边（设置页卡片）
+
+插件声明 `dsh.client = { platform: 'web', inject: ['…client-ui-settings', '…client-ui-slots'] }` 与 `exports["./client"]`，由宿主的 client-modules 服务把 `lib/client.js` 作为浏览器模块下发（文件形如 `window.__ModuleLoader__.load({ id, factory })`，导出 `apply(ctx)`/`inject`）。
+
+- `apply(ctx)` → `ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'dsh-wechat', order:45, label:'微信' }, WechatSection))`；
+- 组件只用 `react.createElement`（不引入 `@deepseek-ai` 运行时包，无构建步骤），每 4 秒轮询宿主接口渲染状态；
+- 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr.svg,refresh}`：`status` 返回连接/阶段/`qrUrl`/`pageUrl`/版本/最近错误，`qr.svg` 复用扫码页同一套矩阵渲染，`refresh` 置 `loginPage.restartRequested` 让登录流换一张码；
+- **边界**：这三个 API 不带令牌（回环地址信任），与同类微信插件一致；完整扫码页与 `/state.json` 仍要求一次性令牌。本地进程因此可以读到二维码——等于可以抢绑，这一点写进已知限制。
+
 ## 渲染
 
 - **表格**（`renderTable()`）：`/status` 输出 **Markdown 表格**——微信会渲染它，所以不需要自己画框线，也**不需要按中文双宽补空格**（对齐由渲染器负责）。单元格里的 `|` 转义成 `\|`、换行折成空格，避免破坏表格结构；放不进单元格的长内容（最近错误原文）写在表格下方。
@@ -226,7 +235,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 231 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 230 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |

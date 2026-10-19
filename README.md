@@ -74,9 +74,20 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 图片 / 文件 | 入站图片/文件/语音/视频解密落盘并把路径交给 Agent；Agent 可用工具把产物发回 |
 | 模型工具 | `wechat_send_text`、`wechat_send_file`、`wechat_chat_info` |
 | 访问控制 | 默认白名单 + 所有者模型；非所有者不能改权限、不能清凭据 |
+| 设置页卡片 | DSH **设置 → 微信**：连接状态、未绑定时的**二维码**、刷新二维码、打开扫码页（客户端半边，见下） |
 | 长任务可见 | 「对方正在输入」+ 工具进度行（`progress: brief`）；长任务不静默、也不额外占用发送额度 |
 | 渠道提示词 | 自动告诉模型「这个会话在微信里」：最终回答会自动送达、交付文件用 `wechat_send_file`、长内容先落盘再发——避免它把产物只写到磁盘上（只注入本插件创建的会话） |
 | 断线自愈 | 长轮询退避重试且不丢游标；`ret=-14` 自动清凭据并重新扫码；登录失败 60 秒重试 |
+
+## 设置页（GUI）
+
+插件带一个**客户端半边**：DSH 设置 → **微信** 里有一张卡片，显示
+
+- 连接状态（已连接 / 等待扫码 / 登录失败）与 bot 名；
+- **未绑定时直接显示二维码**（`<img>` 指向前端路由 `/dsh-wechat/api/qr.svg`），旁边有「刷新二维码」与「打开扫码页」；
+- 最近错误（来自 `/status` 同一份状态）。
+
+实现方式与其它微信插件一致：`package.json` 里声明 `dsh.client`（`platform: 'web'`）+ `exports["./client"]`，浏览器 bundle 手写在 `lib/client.js`（只 `require("react")`，注册 `settings.section` slot），宿主侧在 GUI 的 web server 上提供 `/dsh-wechat/api/{status,qr.svg,refresh}`。这几个 API 只监听回环地址、**不带令牌**（与同类插件相同），完整扫码页仍由一次性令牌保护。
 
 ## 微信里的命令
 

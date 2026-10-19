@@ -133,7 +133,10 @@ test('outbound hosts are only the configured WeChat gateway and loopback', async
 test('every long-lived timer is unref-ed so the host can exit', async () => {
   // Counting unrefs per file let one un-unref-ed interval hide behind an unrelated
   // `setTimeout(...).unref()`. Each interval is checked on its own now.
-  for (const entry of await runtimeSources()) {
+  // Browser-only modules are exempt: a `setInterval` there belongs to the settings card and
+  // is cleared when the component unmounts, so it never touches the host process.
+  const browserOnly = new Set(['lib/client.js'])
+  for (const entry of (await runtimeSources()).filter((source) => !browserOnly.has(source.file))) {
     const lines = entry.code.split('\n')
     lines.forEach((line, index) => {
       if (!/setInterval\(/.test(line)) return

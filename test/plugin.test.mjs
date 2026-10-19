@@ -394,7 +394,7 @@ test('the scan page is also served from the harness web server when one exists',
     const token = /t=([0-9a-f]+)/.exec(url)[1]
 
     // The route enforces the same one-time token as the standalone page.
-    const call = async (target) =>
+    const call = async (target, options = {}) =>
       new Promise((resolve) => {
         const response = {
           statusCode: null,
@@ -409,7 +409,7 @@ test('the scan page is also served from the harness web server when one exists',
             resolve(this)
           },
         }
-        routes[0].handler({ url: target, method: 'GET' }, response)
+        routes[0].handler({ url: target, method: options?.method ?? 'GET' }, response)
       })
 
     const denied = await call('/dsh-wechat/')
@@ -433,6 +433,30 @@ test('the scan page is also served from the harness web server when one exists',
     assert.equal(page.statusCode, 200)
     assert.match(page.headers['Content-Type'], /text\/html/)
     assert.ok(page.body.includes('<svg'), 'the GUI route serves the scan code')
+
+    // The GUI settings card reads a localhost-trust API (no token, like the other WeChat
+    // plugins): it only reports status and the code that is already on screen.
+    const status = await call('/dsh-wechat/api/status')
+    assert.equal(status.statusCode, 200)
+    assert.match(status.headers['Content-Type'], /application\/json/)
+    const statusBody = JSON.parse(status.body)
+    assert.equal(statusBody.hasQr, true, 'the card is told a code is waiting')
+    assert.match(statusBody.qrUrl, /^\/dsh-wechat\/api\/qr\.svg\?v=/)
+    assert.ok(statusBody.pageUrl.includes('t='), 'the card can open the tokenised page')
+
+    const qr = await call('/dsh-wechat/api/qr.svg')
+    assert.equal(qr.statusCode, 200)
+    assert.match(qr.headers['Content-Type'], /image\/svg\+xml/)
+    assert.ok(qr.body.startsWith('<svg'), 'the card embeds a real SVG')
+
+    const wrongMethod = await call('/dsh-wechat/api/status', { method: 'POST' })
+    assert.equal(wrongMethod.statusCode, 405)
+
+    const refreshGet = await call('/dsh-wechat/api/refresh')
+    assert.equal(refreshGet.statusCode, 405, 'refreshing is a POST')
+    const refresh = await call('/dsh-wechat/api/refresh', { method: 'POST' })
+    assert.equal(refresh.statusCode, 200)
+    assert.equal(JSON.parse(refresh.body).ok, true)
 
     await fiber.dispose()
     fiber = null
