@@ -3234,3 +3234,60 @@ test('a file the CDN refuses comes back with an actionable hint', async () => {
     await env.cleanup()
   }
 })
+
+test('/errors prints the newest failures as a table, owners only', async () => {
+  const env = await setup({ config: { ownerUserId: 'user@im.wechat' } })
+  try {
+    env.store.noteError('回复仍有 2 段未能发出：ret=-2')
+    env.store.noteError('回复仍有 2 段未能发出：ret=-2')
+    env.store.noteError('文件发送失败（按图片）：HTTP 500')
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/errors' }))
+    const reply = await waitFor(() => env.client.sent.map((entry) => entry.text).find((text) => /错误日志/.test(text)))
+    assert.match(reply, /\| --- \| --- \|/, 'the log is a Markdown table like /status')
+    assert.match(reply, /ret=-2（×2）/, 'repeats are folded with a count')
+    assert.match(reply, /HTTP 500/)
+    // Newest first: the file failure is above the delivery one.
+    assert.ok(reply.indexOf('HTTP 500') < reply.indexOf('ret=-2'))
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/errors is refused for a non-owner and says so when the log is empty', async () => {
+  const env = await setup({ config: { ownerUserId: 'owner@im.wechat' } })
+  try {
+    // A stranger is not the owner: the log can describe the account's transport.
+    await env.bridge.handleInbound(inboundMessage({ text: '/errors' }))
+    const refused = await waitFor(() => env.client.sent.map((entry) => entry.text).find((text) => /只有机器人所有者/.test(text)))
+    assert.match(refused, /只有机器人所有者/)
+
+    env.client.sent.length = 0
+    const ownerEnv = await setup({ config: { ownerUserId: 'user@im.wechat' } })
+    try {
+      await ownerEnv.bridge.handleInbound(inboundMessage({ text: '/errors' }))
+      const empty = await waitFor(() => ownerEnv.client.sent.map((entry) => entry.text).find((text) => /没有记录到错误/.test(text)))
+      assert.match(empty, /没有记录到错误/)
+    } finally {
+      await ownerEnv.cleanup()
+    }
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/status reports how many bots are bound and which one owns the chat', async () => {
+  const env = await setup()
+  try {
+    await env.store.saveCredentials('a@im.bot', { botToken: 'ta', botId: 'a@im.bot' })
+    await env.store.saveCredentials('b@im.bot', { botToken: 'tb', botId: 'b@im.bot' })
+    env.store.setConnected('a@im.bot', true)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/status' }))
+    const status = await waitFor(() => env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text)))
+    assert.match(status, /共 2 只（在线 1）/, 'the bound/online counts are visible')
+    assert.match(status, /本会话 a@im\.bot/, 'the chat names the bot that owns it')
+  } finally {
+    await env.cleanup()
+  }
+})
