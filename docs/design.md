@@ -153,6 +153,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 | 长轮询 | `WechatChannel` 每 bot 一个实例（`botId` 构造参数），各自的 client、cursor、去重窗口 |
 | 投递 | 会话键 → bot → `bridge.#clientFor(bot)`；`contextToken` 按 bot 取，回复不会串号 |
 | 登录 | 由插件编排（`startLogin`），一次一个；`/api/add` 触发，成功后 `startBot(credentials.botId)`，已有通道不受影响。每次尝试有独立 `AbortController` 与 **300 秒**上限（`loginTimeoutSeconds`）：超时/失败都会写入错误日志、把页面置为 `failed`，并释放「添加绑定」（否则卡片永远停在「添加中…」且 `/api/add` 一直 409） |
+| 所有者 | 权限判断用**该会话所属 bot** 的 `ownerUserId`（`checkAccess` 的 per-bot 覆盖、`/status` 与欢迎语的 `isOwner`、`maySendTo` 的允许名单），配置里的 `ownerUserId` 仅作兜底；否则第二只 bot 由别人扫码时会被默认的 allowlist 拒掉 |
 | 兼容 | store 的 `credentials`/`cursor`/`hasSeen`/`contextTokenFor` 在不传 bot 时回落到主 bot；未绑定任何 bot 时回落到 v1 顶层字段（测试与首次登录前状态） |
 
 **验证（进程内，两个真实 HTTP 假网关）**：

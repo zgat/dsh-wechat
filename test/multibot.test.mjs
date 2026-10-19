@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { WechatStore, botOfConversation, withBot } from '../lib/store.js'
+import { checkAccess } from '../lib/config.js'
 import { createLogger } from '../lib/log.js'
 import { createTempStore } from './helpers.mjs'
 
@@ -165,5 +166,24 @@ test('a v1 credential file is rewritten as a v2 file on load', async () => {
     assert.deepEqual(unchanged, rewritten)
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})
+
+test('the owner of a bot is the account that scanned it, not the first bot\'s owner', async () => {
+  const temp = await createTempStore({ accessPolicy: 'allowlist' })
+  try {
+    await temp.store.saveCredentials('a@im.bot', { botToken: 'ta', botId: 'a@im.bot', ownerUserId: 'owner-a@im.wechat' })
+    await temp.store.saveCredentials('b@im.bot', { botToken: 'tb', botId: 'b@im.bot', ownerUserId: 'owner-b@im.wechat' })
+
+    // The per-bot override is what the bridge hands checkAccess.
+    const ownerA = { ownerUserId: temp.store.credentialsFor('a@im.bot').ownerUserId }
+    const ownerB = { ownerUserId: temp.store.credentialsFor('b@im.bot').ownerUserId }
+    assert.equal(checkAccess(temp.config, 'owner-b@im.wechat', ownerB).allowed, true, 'bot B trusts its own owner')
+    assert.equal(checkAccess(temp.config, 'owner-b@im.wechat', ownerA).allowed, false, 'and not through bot A')
+    assert.equal(checkAccess(temp.config, 'stranger@im.wechat', ownerB).allowed, false)
+    // With no per-bot information the configured owner still works (single-bot behaviour).
+    assert.equal(checkAccess({ ...temp.config, ownerUserId: 'x@im.wechat' }, 'x@im.wechat').allowed, true)
+  } finally {
+    await temp.cleanup()
   }
 })

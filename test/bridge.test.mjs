@@ -3291,3 +3291,29 @@ test('/status reports how many bots are bound and which one owns the chat', asyn
     await env.cleanup()
   }
 })
+
+test('a message to the second bot is judged by that bot\'s owner, not the first one\'s', async () => {
+  // Default policy is allowlist: only owners and listed ids get through.
+  const env = await setup({ config: { accessPolicy: 'allowlist' } })
+  try {
+    await env.store.saveCredentials('a@im.bot', { botToken: 'ta', botId: 'a@im.bot', ownerUserId: 'owner-a@im.wechat' })
+    await env.store.saveCredentials('b@im.bot', { botToken: 'tb', botId: 'b@im.bot', ownerUserId: 'owner-b@im.wechat' })
+
+    // The owner of bot B talks to bot B: allowed, and it reaches the agent.
+    await env.bridge.handleInbound(
+      inboundMessage({ id: 11, userId: 'owner-b@im.wechat', text: '你好' }),
+      'b@im.bot',
+    )
+    await waitFor(() => env.harness.agents.length === 1, { timeoutMs: 4_000, label: 'agent for bot B' })
+
+    // A stranger to both is still refused.
+    await env.bridge.handleInbound(
+      inboundMessage({ id: 12, userId: 'stranger@im.wechat', text: '你好' }),
+      'b@im.bot',
+    )
+    const refused = await waitFor(() => env.client.sent.map((entry) => entry.text).find((text) => /不在白名单/.test(text)))
+    assert.match(refused, /不在白名单/)
+  } finally {
+    await env.cleanup()
+  }
+})
