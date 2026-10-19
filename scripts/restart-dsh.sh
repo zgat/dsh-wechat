@@ -58,9 +58,24 @@ log() {
 # --- discovery -------------------------------------------------------------
 
 app_pid() {
-  # The window server knows the app; fall back to whoever holds the web port.
+  # The plugin's boot record names the host process, which is the one that owns the GUI
+  # port. `pgrep -x` is not reliable here (the process comm is truncated, so it matched
+  # nothing and `lsof -p ""` listed every listener on the machine).
+  local boot_pid
+  boot_pid="$(node -e '
+    const fs = require("node:fs");
+    try {
+      const state = JSON.parse(fs.readFileSync(process.argv[1] + "/state.json", "utf8"));
+      const boot = Array.isArray(state.boots) ? state.boots.at(-1) : null;
+      process.stdout.write(boot && boot.pid ? String(boot.pid) : "");
+    } catch { process.stdout.write(""); }
+  ' "$STATE_DIR" 2>/dev/null)"
+  if [ -n "$boot_pid" ] && kill -0 "$boot_pid" 2>/dev/null; then
+    printf '%s' "$boot_pid"
+    return
+  fi
   local pid
-  pid="$(pgrep -x "DeepSeek Harness" 2>/dev/null | head -1)"
+  pid="$(pgrep -f "DeepSeek Harness.app/Contents/MacOS" 2>/dev/null | head -1)"
   [ -n "$pid" ] && { printf '%s' "$pid"; return; }
   lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $2}' | head -1
 }
@@ -75,6 +90,21 @@ installed_version() {
       process.stdout.write(String(req("dsh-wechat/package.json").version));
     } catch { process.stdout.write("unknown"); }
   ' "$PROFILE_DIR" 2>/dev/null
+}
+
+boot_stamp() {
+  # The plugin writes a boot record as it loads. Its newest entry is the only signal that
+  # means "this launch finished booting": the GUI's web server picks a random port each
+  # time (0 in the profile), so waiting on a fixed port reported a healthy restart as a
+  # failure.
+  node -e '
+    const fs = require("node:fs");
+    try {
+      const state = JSON.parse(fs.readFileSync(process.argv[1] + "/state.json", "utf8"));
+      const boot = Array.isArray(state.boots) ? state.boots.at(-1) : null;
+      process.stdout.write(boot ? String(boot.at ?? boot.pid ?? "") : "");
+    } catch { process.stdout.write(""); }
+  ' "$STATE_DIR" 2>/dev/null
 }
 
 running_version() {
@@ -101,7 +131,8 @@ case "$MODE" in
     exit 0
     ;;
   verify)
-    log "GUI 端口 $WEB_PORT: $(port_open "$WEB_PORT" && echo 在听 || echo 未监听)"
+    LISTENING="$(lsof -nP -a -p "$(app_pid)" -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {sub(/.*:/,"",$9); print $9}' | sort -u | paste -sd, -)"
+    log "GUI 监听端口: ${LISTENING:-未监听}（profile 配置为 0 时每次启动随机）"
     log "扫码页端口 $PLUGIN_PORT: $(port_open "$PLUGIN_PORT" && echo 在听 || echo 未监听)"
     log "profile 已装版本: $(installed_version)"
     log "运行中的版本   : $(running_version)"
@@ -110,7 +141,7 @@ case "$MODE" in
 esac
 
 if [ "$MODE" = "dry-run" ]; then
-  log "将执行：quit \"$APP_NAME\"（当前 pid $(app_pid || echo 未运行)）→ 等待退出 → open -a \"$APP_NAME\" → 等待端口 $WEB_PORT → 校验启动记录"
+  log "将执行：quit \"$APP_NAME\"（当前 pid $(app_pid || echo 未运行)）→ 等待退出 → open -a \"$APP_NAME\" → 等待新的启动记录（GUI 端口每次随机）→ 校验版本"
   [ "$DELAY" -gt 0 ] && log "会先等待 ${DELAY}s"
   exit 0
 fi
@@ -137,6 +168,10 @@ if [ "$DELAY" -gt 0 ]; then
   log "将在 ${DELAY}s 后重启 DSH（取消：$0 --cancel）"
   sleep "$DELAY"
 fi
+
+# Fingerprint the boot record before quitting: the readiness check below accepts only a
+# *newer* record, so a crash-then-relaunch is not mistaken for "already back".
+BOOT_BEFORE="$(boot_stamp)"
 
 PID="$(app_pid)"
 if [ -z "$PID" ]; then
@@ -167,15 +202,31 @@ open -a "$APP_NAME" || {
   exit 1
 }
 
-for _ in $(seq 1 120); do
-  port_open "$WEB_PORT" && break
-  sleep 0.5
-done
-if ! port_open "$WEB_PORT"; then
-  log "60s 内端口 $WEB_PORT 未就绪 —— 应用可能仍在启动，或启动失败（日志 $LOG_FILE）"
-  exit 1
+if [ -n "${DSH_WEB_PORT:-}" ]; then
+  # An explicitly pinned port keeps the old, strict check.
+  for _ in $(seq 1 120); do
+    port_open "$WEB_PORT" && break
+    sleep 0.5
+  done
+  if ! port_open "$WEB_PORT"; then
+    log "60s 内端口 $WEB_PORT 未就绪 —— 应用可能仍在启动，或启动失败（日志 $LOG_FILE）"
+    exit 1
+  fi
+  log "DSH 已回来（端口 $WEB_PORT 在听）"
+else
+  # The profile asks for port 0, so the GUI lands on a random port every launch: wait for
+  # the new boot record instead, and report whichever ports the fresh process holds.
+  for _ in $(seq 1 120); do
+    MATCH="$(boot_stamp)"
+    case "$MATCH" in ""|"$BOOT_BEFORE") sleep 0.5 ;; *) break ;; esac
+  done
+  if [ "$(boot_stamp)" = "$BOOT_BEFORE" ]; then
+    log "60s 内没有新的启动记录 —— 应用可能仍在启动，或启动失败（日志 $LOG_FILE）"
+    exit 1
+  fi
+  PORTS="$(lsof -nP -a -p "$(app_pid)" -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {sub(/.*:/,"",$9); print $9}' | sort -u | paste -sd, -)"
+  log "DSH 已回来（监听端口 ${PORTS:-未知}；启动记录 $(boot_stamp)）"
 fi
-log "DSH 已回来（端口 $WEB_PORT 在听）"
 
 # The plugin writes a boot record as it loads; wait for one from *this* launch.
 for _ in $(seq 1 60); do
