@@ -8,7 +8,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -68,6 +68,18 @@ test('a v1 single-bot state migrates into per-bot buckets and keeps its bindings
     // Dedupe moved with the bot.
     assert.equal(store.hasSeen({ message_id: 'm-1' }, 'bot@im.bot'), true, 'the migrated dedupe window is per bot')
     assert.equal(store.hasSeen({ message_id: 'm-1' }, 'other@im.bot'), false)
+
+    // The rewrite is durable and the original bytes were kept aside before it.
+    await store.flush()
+    const persisted = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8'))
+    assert.equal(persisted.version, 2)
+    assert.ok(persisted.bots['bot@im.bot'], 'the migrated buckets reached the disk')
+    const backups = (await readdir(dir)).filter((name) => name.includes('.v1-backup-'))
+    assert.ok(backups.length >= 1, 'a pre-migration copy was kept')
+    const stateBackup = backups.find((name) => name.startsWith('state.json'))
+    assert.ok(stateBackup, 'the state file has a backup')
+    const backup = JSON.parse(await readFile(join(dir, stateBackup), 'utf8'))
+    assert.equal(backup.cursor, 'cursor-1', 'the backup holds the original v1 bytes')
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }

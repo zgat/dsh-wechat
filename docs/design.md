@@ -148,7 +148,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 | 层 | 做法 |
 | --- | --- |
 | 凭据 | `credentials.json` v2：`{ version: 2, bots: { <botId>: { botToken, baseUrl, ownerUserId, source } } }`；旧单 bot 文件在加载时包成一只 |
-| 状态 | `state.json` v2：`bots[<botId>] = { cursor, seenMessageIds, contextTokens, connected }`；顶层 v1 字段保留为迁移来源，迁移后清空 |
+| 状态 | `state.json` v2：`bots[<botId>] = { cursor, seenMessageIds, contextTokens, connected }`；顶层 v1 字段保留为迁移来源，迁移后清空。迁移前把原文件各复制一份 `*.v1-backup-<时间>`（0600），迁移后立即落盘——重写线上状态不该是不可逆的 |
 | 会话键 | `p2p:<bot>:<user>` / `group:<bot>:<group>`（`withBot` 幂等）；旧键在迁移时一次性重写，`sessions`/`follow`/`pendingSwitch`/`models`/`reasoning`/`welcomed` 全部跟着换键 |
 | 长轮询 | `WechatChannel` 每 bot 一个实例（`botId` 构造参数），各自的 client、cursor、去重窗口 |
 | 投递 | 会话键 → bot → `bridge.#clientFor(bot)`；`contextToken` 按 bot 取，回复不会串号 |
