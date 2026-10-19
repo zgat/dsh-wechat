@@ -138,3 +138,32 @@ test('the per-bot state file survives a reload', async () => {
     await temp.cleanup()
   }
 })
+
+test('a v1 credential file is rewritten as a v2 file on load', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-wechat-cred-'))
+  try {
+    const dir = join(root, 'state')
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, 'credentials.json'),
+      JSON.stringify({ version: 1, botToken: 'tok', botId: 'bot@im.bot', baseUrl: 'https://x', source: 'file' }),
+    )
+    const store = new WechatStore({ config: { stateDir: dir }, logger })
+    await store.load()
+    await store.flush()
+
+    const rewritten = JSON.parse(await readFile(join(dir, 'credentials.json'), 'utf8'))
+    assert.equal(rewritten.version, 2)
+    assert.equal(rewritten.bots['bot@im.bot'].botToken, 'tok')
+    assert.equal(rewritten.botToken, undefined, 'the v1 top-level token is gone')
+
+    // A v2 file is left alone: the rewrite happens once.
+    const again = new WechatStore({ config: { stateDir: dir }, logger })
+    await again.load()
+    await again.flush()
+    const unchanged = JSON.parse(await readFile(join(dir, 'credentials.json'), 'utf8'))
+    assert.deepEqual(unchanged, rewritten)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})

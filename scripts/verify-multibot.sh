@@ -50,7 +50,8 @@ node -e '
     console.log("  bots:", bots.length ? bots.join(", ") : "（未绑定）");
     for (const id of bots) {
       const bucket = state.bots?.[id] ?? {};
-      console.log(`    · ${id}: cursor ${bucket.cursor ? "有" : "（空）"} · 去重 ${(bucket.seenMessageIds ?? []).length} 条 · 令牌 ${Object.keys(bucket.contextTokens ?? {}).length} 个 · ${bucket.connected ? "在线" : "离线"}`);
+      // `connected` in the bucket is the last persisted flag; the API below is the live view.
+      console.log(`    · ${id}: cursor ${bucket.cursor ? "有" : "（空）"} · 去重 ${(bucket.seenMessageIds ?? []).length} 条 · 令牌 ${Object.keys(bucket.contextTokens ?? {}).length} 个`);
     }
   }
   const keys = Object.keys(state.sessions ?? {});
@@ -60,7 +61,9 @@ node -e '
   console.log("  旧键（未命名空间）:", legacy.length ? legacy.join(", ") : "无 ✅");
   const leftovers = ["cursor", "seenMessageIds", "contextTokens"].filter((key) => {
     const value = state[key];
-    return Array.isArray(value) ? value.length > 0 : Boolean(value);
+    if (Array.isArray(value)) return value.length > 0;
+    if (value && typeof value === "object") return Object.keys(value).length > 0;
+    return Boolean(value);
   });
   console.log("  v1 顶层字段残留:", leftovers.length ? leftovers.join(", ") : "无 ✅");
 ' "$STATE_DIR" 2>&1 | sed 's/^/  /'
