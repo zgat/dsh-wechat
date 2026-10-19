@@ -57,3 +57,13 @@ bash scripts/verify-profile-boot.sh          # 启动（真实 host，OS 分配�
 - ❌ **不含微信端到端**：启动验证刻意 `autoLogin: false`，不扫码、不连 iLink 网关；
 - ❌ **不含 `rollback`**：DSH 没有跨版本的插件回滚操作，商城的 `dshOperations.rollback` 我们无法提供证据，保持 `unknown`；
 - ❌ **不是独立安全审计**：本插件按固定源码权限信号自评为 `high`（见 README「权限、外部依赖与失败边界」），因此**不可能**满足 DSH STORE 的自动低风险通道。
+
+## 多 bot 迁移与设置页 API
+
+把插件升级到支持多 bot 的版本后，重启 DSH，再跑：
+
+```bash
+bash scripts/verify-multibot.sh
+```
+
+它会打印运行版本、`state.json` 的 schema 与每只 bot 的游标/去重/令牌/在线状态、会话键是否已按 bot 命名空间重写、v1 顶层字段是否清空、迁移备份文件名，以及 `/dsh-wechat/api/status` 现在返回的是 `bots` 列表还是旧的单 bot 形状（后者说明跑的还是旧版本）。
