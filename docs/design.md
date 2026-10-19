@@ -141,6 +141,22 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 ⚠️ 我们曾把 `ret=-2` 归因于"上下文约 15–30 分钟过期"（实测：+15 分 29 秒成功、+30 分 39 秒起失败、用户发言后 15 秒恢复）。**这个结论可能被"10 条/窗口"混淆**：那段时间我们连续发了 9~10 条（跟读推送 + 测试）。两者都以"用户再发一条"解除，需要用「少量发送 + 长间隔」和「同刻连发 12 条」两个实验区分，尚未定论。
 
+## 多 bot 架构
+
+单实例、多 bot。改的是插件内部，profile 配置不需要多条目：
+
+| 层 | 做法 |
+| --- | --- |
+| 凭据 | `credentials.json` v2：`{ version: 2, bots: { <botId>: { botToken, baseUrl, ownerUserId, source } } }`；旧单 bot 文件在加载时包成一只 |
+| 状态 | `state.json` v2：`bots[<botId>] = { cursor, seenMessageIds, contextTokens, connected }`；顶层 v1 字段保留为迁移来源，迁移后清空 |
+| 会话键 | `p2p:<bot>:<user>` / `group:<bot>:<group>`（`withBot` 幂等）；旧键在迁移时一次性重写，`sessions`/`follow`/`pendingSwitch`/`models`/`reasoning`/`welcomed` 全部跟着换键 |
+| 长轮询 | `WechatChannel` 每 bot 一个实例（`botId` 构造参数），各自的 client、cursor、去重窗口 |
+| 投递 | 会话键 → bot → `bridge.#clientFor(bot)`；`contextToken` 按 bot 取，回复不会串号 |
+| 登录 | 由插件编排（`startLogin`），一次一个；`/api/add` 触发，成功后 `startBot(credentials.botId)`，已有通道不受影响 |
+| 兼容 | store 的 `credentials`/`cursor`/`hasSeen`/`contextTokenFor` 在不传 bot 时回落到主 bot；未绑定任何 bot 时回落到 v1 顶层字段（测试与首次登录前状态） |
+
+**已知边界**：解绑某只 bot 后它的长轮询要等重启才停（通道是一次性实例）；`stats` 与最近错误是全局统计，不按 bot 分开。
+
 ## 客户端半边（设置页卡片）
 
 插件声明 `dsh.client = { platform: 'web', inject: ['…client-ui-settings', '…client-ui-slots'] }` 与 `exports["./client"]`，由宿主的 client-modules 服务把 `lib/client.js` 作为浏览器模块下发（文件形如 `window.__ModuleLoader__.load({ id, factory })`，导出 `apply(ctx)`/`inject`）。
@@ -235,7 +251,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 230 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 234 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |

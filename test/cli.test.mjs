@@ -135,9 +135,9 @@ test('`login --page` serves a scan page and stores the credential on confirmatio
     assert.equal(code, 0, `login must exit 0 (stderr: ${stderr})`)
     assert.match(stdout, /登录成功/)
 
-    const credentials = JSON.parse(await readFile(path.join(dir, 'credentials.json'), 'utf8'))
-    assert.equal(credentials.botToken, 'token-from-qr')
-    assert.equal(credentials.botId, 'bot-qr@im.bot')
+    const stored = JSON.parse(await readFile(path.join(dir, 'credentials.json'), 'utf8'))
+    assert.equal(stored.version, 2)
+    assert.equal(stored.bots['bot-qr@im.bot'].botToken, 'token-from-qr')
   } finally {
     child?.kill('SIGKILL')
     await gateway.close()

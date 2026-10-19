@@ -139,12 +139,16 @@ async function commandStatus(flags) {
   const sessions = Object.entries(store.state.sessions ?? {})
   console.log('dsh-wechat 状态')
   console.log(`  状态目录      ${paths.root}`)
-  console.log(`  凭据          ${store.loggedIn ? `已绑定（来源 ${store.credentials.source ?? 'file'}，bot ${store.credentials.botId ?? 'unknown'}）` : '未绑定'}`)
-  if (store.loggedIn) {
-    console.log(`  API 基座      ${store.credentials.baseUrl ?? DEFAULT_BASE_URL}`)
-    console.log(`  绑定用户      ${store.credentials.ownerUserId ?? 'unknown'}`)
+  const bots = store.botIds
+  console.log(`  已绑定 bot    ${bots.length > 0 ? `${bots.length} 只` : '未绑定'}`)
+  for (const botId of bots) {
+    const credential = store.credentialsFor(botId)
+    const cursor = store.cursorFor(botId)
+    console.log(
+      `    · ${botId}（来源 ${credential.source ?? 'file'}，基座 ${credential.baseUrl ?? DEFAULT_BASE_URL}，` +
+        `用户 ${credential.ownerUserId ?? 'unknown'}，游标 ${cursor ? `${cursor.slice(0, 18)}…` : '空'}）`,
+    )
   }
-  console.log(`  长轮询游标    ${store.cursor ? `${store.cursor.slice(0, 24)}…` : '(空)'}`)
   console.log(`  会话映射      ${sessions.length} 个`)
   for (const [key, sessionId] of sessions) console.log(`    ${key} → ${sessionId}`)
   console.log(`  收发统计      收到 ${store.state.stats.inbound} 条 / 发出 ${store.state.stats.outbound} 条`)

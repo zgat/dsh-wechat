@@ -127,8 +127,9 @@ test('credentials are written atomically with owner-only permissions', async () 
     const mode = (await stat(temp.store.paths.credentials)).mode & 0o777
     assert.equal(mode, 0o600)
     const written = JSON.parse(await readFile(temp.store.paths.credentials, 'utf8'))
-    assert.equal(written.botToken, 'tok')
-    assert.equal(written.version, 1)
+    // v2 keeps one entry per bot, so a second binding never overwrites the first.
+    assert.equal(written.version, 2)
+    assert.equal(written.bots['bot@im.bot'].botToken, 'tok')
 
     await temp.store.clearCredentials()
     await assert.rejects(() => readFile(temp.store.paths.credentials, 'utf8'), /ENOENT/)

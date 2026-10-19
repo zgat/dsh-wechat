@@ -77,32 +77,42 @@ test('the card maps every host status onto a label and a tone', async () => {
   assert.equal(describe(null).tone, 'wait')
   assert.equal(describe(null).label, '读取中…')
 
-  const connected = describe({ connected: true, botId: 'bot@im.bot', hasQr: false })
+  // One bot online.
+  const connected = describe({ bots: [{ botId: 'a@im.bot', connected: true }], hasQr: false })
   assert.equal(connected.tone, 'ok')
   assert.equal(connected.label, '已连接')
-  assert.equal(connected.botId, 'bot@im.bot')
+  assert.equal(connected.bots.length, 1)
 
-  // Logged in but the long poll is down: worth an amber badge, not a green one.
-  const stale = describe({ loggedIn: true, connected: false })
-  assert.equal(stale.tone, 'ok')
-  assert.equal(stale.label, '已登录（连接中断）')
+  // Two bots, one online: the label has to say how many are up.
+  const partial = describe({
+    bots: [{ botId: 'a@im.bot', connected: true }, { botId: 'b@im.bot', connected: false }],
+  })
+  assert.equal(partial.tone, 'ok')
+  assert.equal(partial.label, '已连接 1/2')
 
-  const waiting = describe({ hasQr: true, phase: 'waiting', qrUrl: '/dsh-wechat/api/qr.svg?v=abc', pageUrl: '/dsh-wechat/?t=tok' })
-  assert.equal(waiting.tone, 'wait')
-  assert.equal(waiting.label, '等待扫码')
-  assert.equal(waiting.qrUrl, '/dsh-wechat/api/qr.svg?v=abc', 'the image is served by the host route')
-  assert.equal(waiting.canRefresh, true)
+  // Adding a second bot shows a code but never hides the existing ones.
+  const adding = describe({
+    bots: [{ botId: 'a@im.bot', connected: true }],
+    adding: true,
+    hasQr: true,
+    qrUrl: '/dsh-wechat/api/qr.svg?v=abc',
+  })
+  assert.equal(adding.label, '已连接（添加中）', 'the badge says a scan is in flight')
+  assert.equal(adding.qrUrl, '/dsh-wechat/api/qr.svg?v=abc')
+  assert.equal(adding.canRefresh, true)
+  assert.equal(adding.canAdd, false, 'one scan at a time')
+
+  // Bound but disconnected: not green, and the user can still add or re-open the page.
+  const stale = describe({ bots: [{ botId: 'a@im.bot', connected: false }], pageUrl: '/dsh-wechat/?t=tok' })
+  assert.equal(stale.tone, 'wait')
+  assert.equal(stale.label, '已绑定（连接中断）')
+  assert.equal(stale.pageUrl, '/dsh-wechat/?t=tok')
+  assert.equal(stale.canAdd, true)
 
   const failed = describe({ phase: 'failed', lastError: 'ret=-14' })
   assert.equal(failed.tone, 'err')
   assert.equal(failed.label, '登录失败')
   assert.equal(failed.lastError, 'ret=-14')
-
-  // Connected, no code pending: the page link must survive so re-binding stays reachable.
-  const connectedWithPage = describe({ connected: true, pageUrl: '/dsh-wechat/?t=tok' })
-  assert.equal(connectedWithPage.qrUrl, null)
-  assert.equal(connectedWithPage.pageUrl, '/dsh-wechat/?t=tok')
-  assert.equal(connectedWithPage.canRefresh, false)
 
   assert.equal(describe({}).label, '未绑定')
   assert.equal(describe({ hasQr: false }).canRefresh, false, 'no refresh button without a code')

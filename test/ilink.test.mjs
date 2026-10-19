@@ -183,7 +183,9 @@ test('qr login stores the credential and switches the client to the returned bas
     assert.equal(temp.store.loggedIn, true)
 
     const onDisk = JSON.parse(await readFile(temp.store.paths.credentials, 'utf8'))
-    assert.equal(onDisk.botToken, 'ilinkbot_token_1')
+    // v2 keeps one entry per bot so a second binding cannot overwrite the first.
+    assert.equal(onDisk.version, 2)
+    assert.equal(onDisk.bots['bot-1@im.bot'].botToken, 'ilinkbot_token_1')
 
     // The QR artifact is written for the operator to scan.
     const artifact = await readFile(temp.store.paths.qrText, 'utf8')
