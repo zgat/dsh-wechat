@@ -59,28 +59,17 @@ async function sources(directory = '.') {
   return files
 }
 
-test('exactly one module may start a subprocess, and it guards the input', async () => {
+test('no runtime module starts a subprocess at all', async () => {
+  // The plugin used to launch the operator's browser for the scan page. That single
+  // `child_process` import was both a capability the store's reviewer had to audit and a
+  // reason a user could not simply open the printed address themselves, so it is gone.
   const files = await runtimeSources()
-  const importers = files.filter((entry) => /from 'node:child_process'/.test(entry.code)).map((entry) => entry.file)
-  assert.deepEqual(importers, ['lib/channel.js'], 'only the browser launcher may spawn a process')
-
-  // The single launch is `launch(command[0], …)`, where `launch` is the injected
-  // seam defaulting to `spawn`; that indirection must stay the only one.
-  const callSites = files.flatMap((entry) =>
-    entry.code
-      .split('\n')
-      .map((line, index) => ({ file: entry.file, line: index + 1, text: line }))
-      .filter((entry) => /\blaunch\s*\(/.test(entry.text) || /[^.]\bspawn\s*\(/.test(entry.text)),
-  )
-  assert.equal(callSites.length, 1, `expected one launch call site, found ${JSON.stringify(callSites)}`)
-  assert.match(callSites[0].file, /lib\/channel\.js/)
-
-  const channel = files.find((entry) => entry.file === 'lib/channel.js')
-  const guardAt = channel.code.indexOf('isLaunchableUrl(url)')
-  const spawnAt = channel.code.indexOf('launch(command[0]')
-  assert.ok(guardAt > -1, 'the guard must exist')
-  assert.ok(guardAt < spawnAt, 'the guard must run before the launcher is started')
-  assert.match(channel.code, /internals\.spawn \?\? spawn/, 'the launcher must stay injectable')
+  const importers = files
+    // Imports and module usage only: bare `.exec(` is usually RegExp#exec, which the
+    // store's own lexer also ignores.
+    .filter((entry) => /(?:from|require\s*\(|import\s*\()\s*['"]node:child_process['"]|\bchild_process\s*\./.test(entry.code))
+    .map((entry) => entry.file)
+  assert.deepEqual(importers, [], `no runtime module may start a subprocess: ${importers.join(', ')}`)
 })
 
 test('no OS-automation, autostart, or clipboard integration exists', async () => {

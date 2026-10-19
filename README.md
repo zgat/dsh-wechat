@@ -34,7 +34,7 @@ node bin/dsh-wechat.mjs login --page
 
 **前置条件**：DSH `0.2.0-rc.2`、Node ≥ 20、一个具备微信 ClawBot / iLink 机器人能力的微信号，且能访问 `https://ilinkai.weixin.qq.com` 与 `https://novac2c.cdn.weixin.qq.com`。
 
-**桌面端注意**：`dsh plugin` 会转发给桌面端的 Electron 二进制，App 正忙时可能被中断（实测 `script execution has been terminated`，退出码 254）。稳妥做法是 `node scripts/upgrade.mjs --via-cli`（失败自动回退到内置 pnpm），或先完全退出桌面端。
+**桌面端注意**：`dsh plugin` 会转发给桌面端的 Electron 二进制，App 正忙时可能被中断（实测 `script execution has been terminated`，退出码 254）。稳妥做法是**先完全退出桌面端**再安装（或改用 GUI 的插件页安装，宿主自己不会被打断）。
 
 **无人值守**（环境变量优先于凭据文件，不落盘）：
 
@@ -50,16 +50,13 @@ export DSH_WECHAT_USER_ID=xxx@im.wechat                    # 可选：指定所�
 ## 验证与升级
 
 ```sh
-node scripts/upgrade.mjs --check      # 工作区构建版本 / profile 已装版本 / 运行中的版本
 ```
 
-版本不一致 = 需要重启（`node scripts/upgrade.mjs --check` 会指出）。
+版本不一致 = 需要重启：重启后插件会在状态里同时报告「运行中的版本」与「磁盘已装版本」，不一致时会明确提示。
 
 **配置改动热生效；升级已加载插件的代码需要重启**（原因见 [docs/design.md](docs/design.md#与-dsh-的契约)）：
 
 ```sh
-node scripts/upgrade.mjs --via-cli --restart     # 装完自动重启（默认不重启）
-./scripts/restart-dsh.sh --delay 10              # 手动重启（带护栏与验证）
 node scripts/schedule-restart.mjs --cancel       # 取消已排程的重启
 dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自检
 ```
@@ -142,7 +139,6 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | `autoLogin` | `true` | 无凭据时自动走扫码登录 |
 | `loginPage` | `true` | 是否启动本机扫码页（关闭后二维码只进日志与文件） |
 | `loginPagePort` | `30989` | 扫码页端口；被占用时自动改用系统分配的端口（`0` = 总是系统分配） |
-| `openLoginPage` | `true` | 需要扫码时是否自动用默认浏览器打开扫码页 |
 | `baseUrl` | `null` | 覆盖 iLink 网关地址（默认 `https://ilinkai.weixin.qq.com`） |
 | `cdnBaseUrl` | `null` | 覆盖媒体 CDN 地址 |
 | `chunkChars` | `1800` | 单条微信消息的最大字符数 |
@@ -205,7 +201,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | --- | --- | --- |
 | **文件** | 状态目录 `$DSH_HOME/integrations/dsh-wechat`（凭据/游标/绑定/启动记录，`0600`，目录 `0700`）、媒体目录（默认其下 `media/`，入站附件 `0600`）、扫码页的二维码与 URL 文件 | 不写工作区、不写系统目录（`LaunchAgents`/`crontab`/`systemd` 一律不碰）；写入原子化并带瞬时错误重试 |
 | **网络** | 出站长轮询与发消息（默认 `https://ilinkai.weixin.qq.com`）、附件上传下载（默认 `https://novac2c.cdn.weixin.qq.com/c2c`）、回环扫码页（`127.0.0.1:30989`，可关） | 目标可用配置覆盖但强校验（公网强制 https）；所有请求 `redirect:'error'`；**无遥测、无第三方端点**（由 `test/sideeffects.test.mjs` 出站白名单强制） |
-| **命令/子进程** | 仅一处：扫码登录时用系统启动器打开浏览器（macOS `open` / Linux `xdg-open` / Windows `cmd /c start`） | 非 http(s) 输入在 `spawn` 之前即被拒绝；可注入（测试不产生真实进程）；`openLoginPage: false` 可整体关闭 |
+| **命令/子进程** | **无**：插件不启动任何程序（不打开浏览器、不执行 shell），扫码页只打印地址 | 由 `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不得导入子进程 API |
 | **凭据** | 读取并保存机器人令牌（`credentials.json`，`0600`；也可由环境变量提供，此时不落盘）；日志与工具进度双重脱敏 | 不读取系统钥匙串、不读取无关环境变量；`/logout` 仅所有者可用，并清除读取失败留下的副本 |
 | **原生制品** | 无 | 零运行时依赖、无原生模块，安装不触发编译 |
 | **受保护的 DSH 行为** | 不修改、不遮蔽、不重复安装任何 `@deepseek-ai/*` 组件 | 只通过 `ctx.get(key)` 使用宿主服务，入口 ID 唯一 |
@@ -229,7 +225,6 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 日志只有 `尚未绑定微信机器人` | 没有凭据：`node bin/dsh-wechat.mjs login --page` |
 | 看不到二维码 | ① 日志里的扫码地址；② `cat ~/.dsh/integrations/dsh-wechat/login-page.url`；③ 打开状态目录的 `login-qrcode.svg` |
 | 扫码页打不开 / 端口被占 | 配 `loginPagePort`，或设 `loginPagePort: 0` 让系统分配（日志打印实际地址） |
-| 浏览器没自动弹出 | `openLoginPage: false` 或主机无图形界面；手动打开日志地址 |
 | 反复 `接收消息失败（第 N 次）` | 网络到不了 `ilinkai.weixin.qq.com`：`curl -I https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3` 验证 |
 | `微信会话已过期（ret=-14）` | 插件会清凭据并重新扫码；也可先 `logout` 再 `login` |
 | `no context_token cached` / 主动推送报 `ret=-2 (prepare failed)` | 距该会话最后发言超过约 15–30 分钟：让对方先发一条消息即可恢复 |
@@ -237,7 +232,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 大文件发送失败（`CDN upload timed out`） | 上传预算按体积放大（33MB ≈ 12.7 分钟）；仍失败说明上行持续低于 50KB/s（实测正常在 1.2–6 MB/s），可用 `media.uploadTimeoutMs` 再调大 |
 | 长任务很久没动静 | 微信发任意一句话（或 `/listen`）让那一轮复活；查看队列与运行状态 |
 | 审批/提问在微信没出现 | 该轮不是微信发起的（默认不打扰）；开 `/listen`，或直接在 GUI 回答 |
-| 审批框「允许」没生效（≤0.1.33） | 0.1.34+ 已修（请求挂起时不再 abort 宿主信号）；`node scripts/upgrade.mjs --check` 确认运行版本 |
+| 审批框「允许」没生效（≤0.1.33） | 0.1.34+ 已修（请求挂起时不再 abort 宿主信号）；重启后确认版本 |
 | `/session` 显示 `[object Object]` | 0.1.15 已修（标题快照对象经 `titleText()` 取文本）；版本过旧则升级 |
 | `/session` 里显示"未命名对话" | 该会话还没有 `session/title` 事件；`/session sources` 看来源诊断 |
 | 微信里的 Agent 说"没有跑命令的工具" | 会话未挂 agent preset（0.1.13 起自动挂载）；查看会话挂载的「预设」；**旧会话需 `/new`** |
@@ -246,7 +241,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 想继续某个旧对话 | `/session` 列出选择；被归档的对话会提示先取消归档 |
 | 微信里出现 `⛔ 发送者 … 不在白名单内` | 把该 ID 加进 `allowedUserIds` 或设为 `ownerUserId` |
 | 插件完全没加载 | `dsh --profile <name> --dump-config` 确认 patch 行存在；本插件不声明 `peerDependencies`，不会被版本闸门拦下 |
-| 升级后行为没变 | 已加载的代码不会热替换：`node scripts/upgrade.mjs --check` 看版本差异，然后重启 |
+| 升级后行为没变 | 已加载的代码不会热替换：重启 DSH；重启后状态里会报告运行版本与已装版本是否一致 |
 
 `logLevel: debug` 可看到长轮询、去重、回合收集与竞速细节；日志都带 `[dsh-wechat]` / `[dsh-wechat:channel]` 等前缀。
 
@@ -264,7 +259,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 
 ## 平台支持
 
-macOS 已实测（DSH 0.2.0-rc.2 桌面端，微信收发闭环）；Linux / Windows 代码路径已审计但**未实测**。零运行时依赖、无原生模块、无需编译。平台细节（打开浏览器的分支、权限位差异、Windows 保留设备名与结尾点、原子写的退避重试、终端二维码字形）见 [docs/design.md](docs/design.md#平台兼容性)。
+macOS 已实测（DSH 0.2.0-rc.2 桌面端，微信收发闭环）；Linux / Windows 代码路径已审计但**未实测**。零运行时依赖、无原生模块、无需编译。平台细节（权限位差异、Windows 保留设备名与结尾点、原子写的退避重试、终端二维码字形）见 [docs/design.md](docs/design.md#平台兼容性)。
 
 ## 合规提醒
 

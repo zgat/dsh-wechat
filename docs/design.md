@@ -175,7 +175,7 @@ $DSH_HOME/integrations/dsh-wechat/
 - **一次性令牌**：扫码页地址里的 `?t=<hex>` 是回环页与 `/state.json` 的唯一凭证 → `/login` 回复不含令牌（指向日志/文件），出站记录与日志里的 `t=…`、`/t/…/` 也会被替换。
 - **网络**：所有请求 `redirect: 'error'`；登录返回的 API 基座与 CDN 地址强校验（非 http(s)、对公网降级到 http 一律拒绝）；下载带字节上限（声明值预检 + 流式累计，边下边判）。
 - **超时与 abort**：请求的守卫覆盖到**响应体读完**（`fetch()` 返回只代表响应头到达；此前清理守卫会让 body 停滞把接收循环挂死）；调用前已 abort 的 signal 不再发出请求。
-- **回环页**：只监听 `127.0.0.1`，一次性令牌用 `timingSafeEqual` 比较，未授权一律 403。
+- **回环页**：只监听 `127.0.0.1`，一次性令牌用 `timingSafeEqual` 比较，未授权一律 403；插件不启动浏览器，只在日志与 `login-page.url` 里公布地址。
 
 ## iLink 协议要点（实现相关）
 
@@ -252,7 +252,7 @@ npm test          # 231 个用例：单元 + 协议 + 桥接 + 交互时序 + �
 
 **真机验证过的通道**：微信收发闭环（macOS + DSH 0.2.0-rc.2 桌面端）；**出站文件**——图片（`image_item`）与文件（`file_item`）各一次，AES 加密 → CDN 上传 → `sendmessage` 全链路成功；双端竞速（GUI 先答 → 微信收到作废提示并自动关框）；审批「允许」真实放行。
 
-**一次性 profile 证据**：`scripts/verify-profile-install.sh`（安装/组合/卸载）与 `scripts/verify-profile-boot.sh`（真实 host 启动、探活插件路由、卸载回基线）在临时 `DSH_HOME` 上运行，结果记录在 [profile-verification.md](profile-verification.md)。
+**一次性 profile 证据**：`bash scripts/verify-profile-install.sh`（安装/组合/卸载）与 `bash scripts/verify-profile-boot.sh`（真实 host 启动、探活插件路由、卸载回基线）在临时 `DSH_HOME` 上运行（这两个脚本属仓库工具，不在发布包内），结果记录在 [profile-verification.md](profile-verification.md)。
 
 ## 平台兼容性
 
@@ -261,7 +261,6 @@ npm test          # 231 个用例：单元 + 协议 + 桥接 + 交互时序 + �
 | 维度 | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | 运行状态 | ✅ 已实测（DSH 0.2.0-rc.2 桌面端，微信收发闭环） | ⚠️ 未实测，代码路径已审计 | ⚠️ 未实测，代码路径已审计 |
-| 打开扫码页 | `open <url>` | `xdg-open <url>` | `cmd /c start "" <url>`，`windowsHide` 不闪黑框 |
 | 扫码页监听 | `127.0.0.1` | 同 | 同（回环绑定不触发防火墙弹窗） |
 | 凭据/附件权限 | `0600`/`0700` 生效 | 生效 | `mode` 基本无效（Node 只映射只读位）；保护来自 `%USERPROFILE%` 目录 ACL |
 | 状态原子写 | `rename` 覆盖 | 同 | 覆盖可能 `EPERM`/`EBUSY`（杀软/索引器）→ 内置退避重试，失败清理临时文件 |
@@ -271,7 +270,7 @@ npm test          # 231 个用例：单元 + 协议 + 桥接 + 交互时序 + �
 | 附件文件名 | 原名 | 原名 | 保留设备名（`CON`/`NUL`/`COM0`/`COM1`/`LPT0`/`CONIN$`/`CONOUT$`…）加 `_`；结尾的点/空格去掉，`report.tmp.` 这类不当作"已有扩展名" |
 | 依赖 | 零运行时依赖、无需编译 | 同 | 同（无 node-gyp 问题） |
 
-跨平台判断抽成了可测纯函数（`expandHome`/`unquote`/`isInsideDirectory`/`withRetries`），并有测试在 macOS 上直接断言 Windows 语义（大小写不敏感、反斜杠分隔符、路径前缀逃逸）。换平台时先 `npm test`，再 `node bin/dsh-wechat.mjs login --page` 确认端口与浏览器分支。
+跨平台判断抽成了可测纯函数（`expandHome`/`unquote`/`isInsideDirectory`/`withRetries`），并有测试在 macOS 上直接断言 Windows 语义（大小写不敏感、反斜杠分隔符、路径前缀逃逸）。换平台时先 `npm test`，再 `node bin/dsh-wechat.mjs login --page` 确认回环端口与扫码页可用。
 
 ## 已知限制
 

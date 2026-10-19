@@ -8,8 +8,8 @@
 
 | 项目 | 事实 | 约束 |
 | --- | --- | --- |
-| 子进程 | **仅一处**：`lib/channel.js` 的 `openInBrowser()` 用 `spawn` 打开浏览器 | 输入必须是绝对 http(s) URL（`isLaunchableUrl()` 在 `spawn` **之前**拒绝空串、`file:`、`javascript:`、裸路径等）；`spawn` 可注入（测试不产生真实进程）；`openLoginPage: false` 可整体关闭 |
-| 其它进程 | 无 `exec`/`execFile`/`fork`/`osascript`/`defaults`/`plutil` | 断言：只有 `lib/channel.js` 允许导入 `node:child_process`，且只有一处启动调用 |
+| 子进程 | **无**：插件不启动任何程序（不打开浏览器、不执行 shell）；扫码页只打印地址 | `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不导入子进程 API |
+| 其它进程 | 无 `exec`/`execFile`/`fork`/`osascript`/`defaults`/`plutil` | 断言：运行时不导入任何子进程 API |
 | 进程生命周期 | 不调用 `process.exit()`；不注册信号处理（CLI 除外，且在自己的 `finally` 里 `off`） | 断言：全仓禁止 `process.exit(` |
 
 历史教训：`openInBrowser('')` 曾在 macOS 上让 `/usr/bin/open` 打开**当前目录**，于是每次跑测试都弹出访达窗口。现在不可用输入一次都不会到达启动器。
@@ -80,7 +80,6 @@ media/<日期>/<时间>-<名>   0600，入站附件解密后的落盘位置
 
 | 副作用 | 关闭方式 |
 | --- | --- |
-| 首次无凭据时**自动打开浏览器**显示扫码页 | `openLoginPage: false`（日志与 `login-page.url` 仍在） |
 | 扫描页监听一个回环端口 | `loginPage: false`（二维码只进日志与文件） |
 | 每回合向微信发送「正在输入」与工具进度 | `typing: false`、`progress: off` |
 | 长轮询持续占用一条出站连接 | 卸载插件或退出 DSH |
@@ -91,7 +90,6 @@ media/<日期>/<时间>-<名>   0600，入站附件解密后的落盘位置
 | --- | --- | --- |
 | 文件权限 | `0600`/`0700` 真正生效 | `mode` 只映射只读位，实际保护来自用户目录 ACL |
 | 状态文件替换 | `rename` 直接覆盖 | 可能被占用而 `EPERM`/`EBUSY` → `withRetries` 退避重试 4 次 |
-| 打开浏览器 | `open` / `xdg-open` | `cmd /c start ""`，`windowsHide: true` 避免黑框闪现 |
 | 附件文件名 | 原样 | 保留设备名加 `_`、去掉结尾点与空格（否则 Windows 会静默改名或拒绝创建） |
 | 中断 | SIGINT/SIGTERM | 仅 SIGINT |
 

@@ -427,8 +427,11 @@ test('the restart job is a one-shot LaunchAgent on internal paths only', async (
   assert.match(xml, /--delay 10/)
   // The flag must be an assignment prefix, not a standalone statement, or it never
   // reaches the script and its guard skips the restart (this shipped once).
-  assert.match(xml, /DSH_RESTART_FORCE=1 &quot;|DSH_RESTART_FORCE=1 "/)
+  assert.match(xml, /DSH_RESTART_FORCE=1 &quot;|DSH_RESTART_FORCE=1 /)
   assert.ok(!/DSH_RESTART_FORCE=1;/.test(xml), 'a separate statement would not export the flag')
+  // The script carries no executable bit (the store's admission rejects an executable
+  // artifact), so the job has to hand it to bash explicitly.
+  assert.match(xml, /\/bin\/bash "/, 'invoked through bash')
   // Shell metacharacters must be XML-escaped or launchd refuses the file.
   assert.equal(xmlEscape('a && b > c'), 'a &amp;&amp; b &gt; c')
   assert.match(xml, /2&gt;\/dev\/null/)
@@ -497,7 +500,11 @@ test('the restart job writes one log and is scheduled through a single label', a
   assert.match(plist, /StandardOutPath/, 'stdout goes to a file')
   assert.match(plist, /StandardErrorPath/, 'stderr goes to a file')
   assert.match(plist, /DSH_RESTART_LOG="\$HOME\/dsh-wechat-restart.log"/, 'the script logs where the job logs')
-  assert.match(plist, /DSH_RESTART_FORCE=1 "\/tmp\/restart-dsh.sh" --delay 10/, 'force stays an assignment prefix')
+  assert.match(
+    plist,
+    /DSH_RESTART_FORCE=1 \/bin\/bash "\/tmp\/restart-dsh\.sh" --delay 10/,
+    'force stays an assignment prefix and the script runs under bash',
+  )
   assert.match(plist, /<key>KeepAlive<\/key><false\/>/, 'one-shot: never respawn')
   assert.ok(plistPath().endsWith('com.zgat.dsh-wechat-restart.plist'))
 })

@@ -6,8 +6,8 @@ DSH STORE 在把插件标为可安装前要求「一次性 Profile 的安装、�
 
 ```sh
 npm pack                                     # 产出 dsh-wechat-0.1.35.tgz
-scripts/verify-profile-install.sh            # 安装 / 组合 / 卸载
-scripts/verify-profile-boot.sh               # 启动（真实 host，OS 分配端口）
+bash scripts/verify-profile-install.sh       # 安装 / 组合 / 卸载
+bash scripts/verify-profile-boot.sh          # 启动（真实 host，OS 分配端口）
 ```
 
 | 脚本 | 覆盖 | 隔离手段 |

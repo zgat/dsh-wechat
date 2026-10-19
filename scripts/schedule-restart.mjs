@@ -51,7 +51,9 @@ export function buildPlist(options) {
   // The force flag is an *assignment prefix* on the same command: written as a
   // separate statement it would not reach the script's environment, and the script's
   // re-entry guard would silently skip the restart.
-  const invocation = `DSH_RESTART_LOG="${logFile}" ${options.force ? 'DSH_RESTART_FORCE=1 ' : ''}"${options.scriptPath}" --delay ${options.delaySeconds}`
+  // The script carries no executable bit (the store rejects packages that include one), so
+  // it is always invoked through the shell it declares.
+  const invocation = `DSH_RESTART_LOG="${logFile}" ${options.force ? 'DSH_RESTART_FORCE=1 ' : ''}/bin/bash "${options.scriptPath}" --delay ${options.delaySeconds}`
   const command = [
     invocation,
     // Cleanup before bootout: unloading kills this job's process tree, so anything

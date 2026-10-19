@@ -154,7 +154,7 @@ try {
           const scheduled = await scheduleRestart({ delaySeconds: options.restartDelay, force: true })
           if (!scheduled.scheduled) {
             console.log(`\n⚠️  已跳过自动重启：${scheduled.recent} 次重启刚排过（熔断，避免“一直重启”的观感）。`)
-            console.log('   需要现在重启就手动执行：./scripts/restart-dsh.sh --delay 10')
+            console.log('   需要现在重启就手动执行：bash scripts/restart-dsh.sh --delay 10')
             console.log(`   日志：${scheduled.log}`)
           } else {
             console.log(`\n已安排重启：${scheduled.delaySeconds} 秒后（launchd 一次性任务，执行后自清理）`)
@@ -164,7 +164,7 @@ try {
         }
       } else {
         console.log('\nℹ️  未重启：新代码要等 DSH 重启后才生效（自动重启已改为显式 opt-in）。')
-        console.log('   现在重启：./scripts/restart-dsh.sh --delay 10')
+        console.log('   现在重启：bash scripts/restart-dsh.sh --delay 10')
         console.log('   下次让它自动重启：node scripts/upgrade.mjs --via-cli --restart [--restart-delay N]')
       }
     }

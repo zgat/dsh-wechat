@@ -5,7 +5,6 @@ import { createServer } from 'node:http'
 import { LoginPage } from '../lib/loginpage.js'
 import { encodeQrMatrix, renderQrSvg } from '../lib/qr.js'
 import { createLogger } from '../lib/log.js'
-import { isLaunchableUrl, openInBrowser } from '../lib/channel.js'
 
 const logger = createLogger('silent')
 const PAYLOAD = 'https://weixin.qq.com/x/dsh-wechat-login'
@@ -160,53 +159,4 @@ test('stop() releases the port', async () => {
   const probe = createServer(() => {})
   await new Promise((resolve) => probe.listen(port, '127.0.0.1', resolve))
   await new Promise((resolve) => probe.close(resolve))
-})
-
-test('openInBrowser refuses an unusable URL without launching anything', () => {
-  // Regression: `open ''` on macOS opens the *current directory* in Finder rather
-  // than failing, so this test must assert that no launcher was started — asserting
-  // a boolean return is what let a Finder window pop up on every test run.
-  const launched = []
-  const fakeSpawn = (...args) => {
-    launched.push(args)
-    return { on() {}, unref() {} }
-  }
-  for (const value of ['', '   ', undefined, null, 42, 'not a url', 'file:///etc/passwd', 'javascript:alert(1)', '/tmp']) {
-    const opened = openInBrowser(value, logger, { spawn: fakeSpawn })
-    assert.equal(opened, false, `${JSON.stringify(value)} must be refused`)
-  }
-  assert.equal(launched.length, 0, 'no launcher may be spawned for an unusable URL')
-  assert.equal(isLaunchableUrl(''), false)
-  assert.equal(isLaunchableUrl('https://example.test/x'), true)
-})
-
-test('openInBrowser hands the platform launcher the http(s) URL', () => {
-  const cases = [
-    ['darwin', 'open', (url) => [url]],
-    ['win32', 'cmd', (url) => ['/c', 'start', '', url]],
-    ['linux', 'xdg-open', (url) => [url]],
-  ]
-  for (const [platform, executable, expectedArgs] of cases) {
-    const launched = []
-    const fakeSpawn = (...args) => {
-      launched.push(args)
-      return { on() {}, unref() {} }
-    }
-    const url = 'http://127.0.0.1:30989/t/abc/'
-    assert.equal(openInBrowser(url, logger, { spawn: fakeSpawn, platform }), true)
-    assert.equal(launched.length, 1)
-    assert.equal(launched[0][0], executable)
-    assert.deepEqual(launched[0][1], expectedArgs(url))
-    // Detached and quiet, with no console flash on Windows.
-    assert.deepEqual(launched[0][2], { stdio: 'ignore', detached: true, windowsHide: true })
-  }
-})
-
-test('a launcher that fails to start is reported, not thrown', () => {
-  const result = openInBrowser('https://example.test/x', logger, {
-    spawn: () => {
-      throw new Error('spawn EACCES')
-    },
-  })
-  assert.equal(result, false)
 })

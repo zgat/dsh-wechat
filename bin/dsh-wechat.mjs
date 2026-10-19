@@ -22,13 +22,12 @@ import { LoginPage } from '../lib/loginpage.js'
 import { createLogger } from '../lib/log.js'
 import { encodeQrMatrix, renderQrText } from '../lib/qr.js'
 import { WechatStore, resolvePaths } from '../lib/store.js'
-import { openInBrowser } from '../lib/channel.js'
 
 const HELP = `dsh-wechat — 微信（腾讯 iLink / ClawBot）接入 DeepSeek Harness 的命令行工具
 
 用法：
-  dsh-wechat login [--state-dir <目录>] [--route-tag <标签>] [--base-url <地址>] [--page] [--port N] [--no-open]
-      申请登录二维码；默认在终端渲染。加 --page 时改为启动本机扫码页并用浏览器打开。
+  dsh-wechat login [--state-dir <目录>] [--route-tag <标签>] [--base-url <地址>] [--page] [--port N]
+      申请登录二维码；默认在终端渲染。加 --page 时启动本机扫码页并打印地址（请自行在浏览器打开）。
 
   dsh-wechat status [--state-dir <目录>]
       查看绑定状态、长轮询游标、会话映射与收发统计。
@@ -100,8 +99,8 @@ async function commandLogin(flags) {
     if (page) {
       page.status = () => ({ loggedIn: store.loggedIn, botId: store.credentials?.botId ?? null, stateDir: resolvePaths(config).root })
       await page.start()
-      if (!flags.noOpen) openInBrowser(page.url, logger)
-      else console.log('（已用 --no-open 跳过自动打开浏览器）')
+      // The plugin never starts a program: the address is printed and the operator opens it.
+      console.log(`（请在浏览器里打开上面的地址扫码；--no-open 已不再需要）`)
     }
     const credentials = await qrLogin({
       client,

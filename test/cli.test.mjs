@@ -76,7 +76,7 @@ test('`login --page` serves a scan page and stores the credential on confirmatio
   try {
     child = spawn(
       process.execPath,
-      [CLI, 'login', '--state-dir', dir, '--base-url', gateway.baseUrl, '--page', '--port', '0', '--no-open'],
+      [CLI, 'login', '--state-dir', dir, '--base-url', gateway.baseUrl, '--page', '--port', '0'],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     )
     let stdout = ''
@@ -97,9 +97,9 @@ test('`login --page` serves a scan page and stores the credential on confirmatio
     const url = /扫码页：(http:\/\/127\.0\.0\.1:\d+\/t\/[0-9a-f]+\/)/.exec(stdout)[1]
     // The banner is printed right after the page resolves, so wait for it rather
     // than racing the child's stdout.
-    await waitFor(() => stdout.includes('已用 --no-open 跳过自动打开浏览器'), {
+    await waitFor(() => stdout.includes('请在浏览器里打开上面的地址扫码'), {
       timeoutMs: 5_000,
-      label: 'no-open banner',
+      label: 'scan page banner',
     })
 
     const urlFile = path.join(dir, 'login-page.url')
