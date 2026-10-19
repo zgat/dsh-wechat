@@ -54,9 +54,33 @@ node -e '
       console.log(`    · ${id}: cursor ${bucket.cursor ? "有" : "（空）"} · 去重 ${(bucket.seenMessageIds ?? []).length} 条 · 令牌 ${Object.keys(bucket.contextTokens ?? {}).length} 个`);
     }
   }
+  // Per-bot evidence of isolation: the cursor, dedupe window, reply tokens and outbound
+  // count of each bot. Two bots talking to the same person must show up as two rows with
+  // different numbers and two conversation keys.
+  if (isV2) {
+    const outbound = Array.isArray(state.outbound) ? state.outbound : [];
+    console.log("  每只 bot 的活动（应各自独立）:");
+    for (const id of Object.keys(credentials.bots)) {
+      const bucket = state.bots?.[id] ?? {};
+      const sent = outbound.filter((entry) => entry.botId === id);
+      const last = sent.at(-1)?.at;
+      console.log(`    · ${id}: 游标 ${bucket.cursor ? "有" : "空"} · 去重 ${(bucket.seenMessageIds ?? []).length} · 令牌 ${Object.keys(bucket.contextTokens ?? {}).length} · 出站 ${sent.length}${last ? `（最近 ${new Date(last).toLocaleString("zh-CN", { hour12: false })}）` : ""}`);
+    }
+  }
+
   const keys = Object.keys(state.sessions ?? {});
   console.log("  会话绑定:", keys.length, "个");
   for (const key of keys.slice(0, 5)) console.log(`    ${key} → ${state.sessions[key]}`);
+  const perBot = {};
+  for (const key of keys) {
+    const parts = key.split(":");
+    if (parts.length >= 3) perBot[parts[1]] = (perBot[parts[1]] ?? 0) + 1;
+  }
+  const botNames = Object.keys(perBot);
+  if (botNames.length > 1) {
+    console.log("  会话键分布:", botNames.map((id) => `${id} ${perBot[id]} 个`).join(" · "), "✅ 按 bot 隔离");
+  }
+
   const legacy = keys.filter((key) => /^(p2p|group):[^:]+$/.test(key));
   console.log("  旧键（未命名空间）:", legacy.length ? legacy.join(", ") : "无 ✅");
   const leftovers = ["cursor", "seenMessageIds", "contextTokens"].filter((key) => {

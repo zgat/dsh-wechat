@@ -380,3 +380,85 @@ test('a login nobody completes times out, says so, and frees the add button', as
     await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }
 })
+
+test('while adding a bot the QR stays visible even though another bot is connected', async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-addqr-'))
+  const gA = await startGateway()
+  const gLogin = await startGateway()
+  await writeFile(
+    path.join(stateDir, 'credentials.json'),
+    JSON.stringify({
+      version: 2,
+      bots: { 'bot-a@im.bot': { version: 1, botToken: 'token-a', botId: 'bot-a@im.bot', baseUrl: gA.baseUrl, source: 'file' } },
+    }),
+  )
+
+  const root = new Context()
+  const ctx = root.isolate?.() ?? root
+  const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
+  ctx.provide('agents', harness.registry)
+  ctx.provide('sessions', { list: () => [], get: () => undefined })
+  ctx.provide('tools', { register: () => () => {} })
+  const routes = []
+  ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
+
+  const fiber = ctx.plugin(plugin, {
+    stateDir,
+    accessPolicy: 'open',
+    typing: false,
+    progress: 'off',
+    logLevel: 'silent',
+    loginPage: true,
+    loginPagePort: 0,
+    autoLogin: false,
+    baseUrl: gLogin.baseUrl,
+  })
+
+  const call = async (target, options = {}) =>
+    new Promise((resolve) => {
+      const response = {
+        statusCode: null,
+        headers: null,
+        body: '',
+        writeHead(status, headers) { this.statusCode = status; this.headers = headers },
+        end(body) { this.body = body ?? ''; resolve(this) },
+      }
+      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+    })
+
+  try {
+    await waitFor(() => gA.state.polls > 0 && routes.length === 1, { timeoutMs: 8_000, label: 'bot A polling' })
+
+    // Before the scan: bot A is connected and there is no code.
+    const before = JSON.parse((await call('/dsh-wechat/api/status')).body)
+    assert.equal(before.bots.length, 1)
+    assert.equal(before.hasQr, false)
+
+    await call('/dsh-wechat/api/add', { method: 'POST' })
+    await waitFor(() => gLogin.state.qrIssued > 0, { timeoutMs: 8_000, label: 'qr issued' })
+
+    const during = await waitFor(
+      async () => {
+        const body = JSON.parse((await call('/dsh-wechat/api/status')).body)
+        return body.hasQr ? body : null
+      },
+      { timeoutMs: 8_000, label: 'qr visible while adding' },
+    )
+    assert.equal(during.adding, true)
+    assert.match(during.qrUrl, /^\/dsh-wechat\/api\/qr\.svg\?v=/)
+    assert.equal(during.bots.length, 1, 'the bound bot is still listed')
+
+    const svg = await call(during.qrUrl)
+    assert.equal(svg.statusCode, 200, 'the card can fetch the code while another bot is connected')
+    assert.match(svg.headers['Content-Type'], /image\/svg\+xml/)
+  } finally {
+    try {
+      await fiber?.dispose?.()
+    } catch {
+      // Assertions above own the failures.
+    }
+    await gA.close()
+    await gLogin.close()
+    await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})
