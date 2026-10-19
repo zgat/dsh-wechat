@@ -155,7 +155,13 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 | 登录 | 由插件编排（`startLogin`），一次一个；`/api/add` 触发，成功后 `startBot(credentials.botId)`，已有通道不受影响 |
 | 兼容 | store 的 `credentials`/`cursor`/`hasSeen`/`contextTokenFor` 在不传 bot 时回落到主 bot；未绑定任何 bot 时回落到 v1 顶层字段（测试与首次登录前状态） |
 
-**已知边界**：解绑某只 bot 后它的长轮询要等重启才停（通道是一次性实例）；`stats` 与最近错误是全局统计，不按 bot 分开。
+**验证（进程内，两个真实 HTTP 假网关）**：
+
+- `test/multibot-plugin.test.mjs` ①：两只 bot 各自轮询自己的网关；同一个人分别发给两只，回复**各自从自己的网关发出并携带各自的 context_token**；`state.json` 里两条会话键 `p2p:<bot>:<user>` 指向**不同**的 DSH 会话；同一个 message id 再发给另一只时**仍被处理**（去重按 bot 而非全局）。
+- ②：`POST /dsh-wechat/api/add` → 网关发码 → 确认 → 新 bot 与已有 bot **并存入同一凭据文件**，且原 bot 在整个登录过程中**持续轮询**（无需重启）。
+- ③ `test/multibot.test.mjs`：v1 状态迁移（会话键、游标、令牌、去重窗口)、两 bot 状态隔离、移除一只不影响另一只、重载持久化。
+
+**已知边界**：解绑某只 bot 后它的长轮询要等重启才停（通道是一次性实例）；`stats` 与最近错误是全局统计，不按 bot 分开。真机上"两只同时在线"尚待用第二个微信号验收。
 
 ## 客户端半边（设置页卡片）
 
@@ -251,7 +257,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 234 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 236 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |
