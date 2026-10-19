@@ -98,6 +98,12 @@ test('the card maps every host status onto a label and a tone', async () => {
   assert.equal(failed.label, '登录失败')
   assert.equal(failed.lastError, 'ret=-14')
 
+  // Connected, no code pending: the page link must survive so re-binding stays reachable.
+  const connectedWithPage = describe({ connected: true, pageUrl: '/dsh-wechat/?t=tok' })
+  assert.equal(connectedWithPage.qrUrl, null)
+  assert.equal(connectedWithPage.pageUrl, '/dsh-wechat/?t=tok')
+  assert.equal(connectedWithPage.canRefresh, false)
+
   assert.equal(describe({}).label, '未绑定')
   assert.equal(describe({ hasQr: false }).canRefresh, false, 'no refresh button without a code')
 })
