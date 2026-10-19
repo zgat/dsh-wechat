@@ -449,6 +449,24 @@ test('the scan page is also served from the harness web server when one exists',
     assert.match(qr.headers['Content-Type'], /image\/svg\+xml/)
     assert.ok(qr.body.startsWith('<svg'), 'the card embeds a real SVG')
 
+    // The card points at the log instead of printing the failure inside itself.
+    assert.ok(statusBody.errorsUrl.endsWith(`/dsh-wechat/errors?t=${token}`))
+    assert.equal(typeof statusBody.errorCount, 'number')
+
+    const errors = await call('/dsh-wechat/api/errors')
+    assert.equal(errors.statusCode, 200)
+    const errorsBody = JSON.parse(errors.body)
+    assert.equal(errorsBody.retentionDays, 30)
+    assert.ok(Array.isArray(errorsBody.entries))
+
+    // The log page keeps the same one-time token as the scan page.
+    const logDenied = await call('/dsh-wechat/errors')
+    assert.equal(logDenied.statusCode, 403)
+    const logPage = await call(`/dsh-wechat/errors?t=${token}`)
+    assert.equal(logPage.statusCode, 200)
+    assert.match(logPage.headers['Content-Type'], /text\/html/)
+    assert.ok(logPage.body.includes('错误日志'))
+
     const wrongMethod = await call('/dsh-wechat/api/status', { method: 'POST' })
     assert.equal(wrongMethod.statusCode, 405)
 

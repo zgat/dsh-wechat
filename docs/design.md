@@ -172,6 +172,17 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr.svg,refresh}`：`status` 返回连接/阶段/`qrUrl`/`pageUrl`/版本/最近错误，`qr.svg` 复用扫码页同一套矩阵渲染，`refresh` 置 `loginPage.restartRequested` 让登录流换一张码；
 - **边界**：这三个 API 不带令牌（回环地址信任），与同类微信插件一致；完整扫码页与 `/state.json` 仍要求一次性令牌。本地进程因此可以读到二维码——等于可以抢绑，这一点写进已知限制。
 
+## 错误日志
+
+`store.noteError()` 既更新 `/status` 用的 `stats.lastError`，也追加到 `state.errors`：
+
+- **裁剪**：写入时按 `errorLogDays`（默认 30）丢弃过期条目，再按 `errorLogEntries`（默认 300）截断为最新 N 条；
+- **合并**：与上一条内容相同且 60 秒内的，只更新时间并把 `count` 加一（重试阶梯会让同一错误连刷数次）；
+- **页面**：`GET /dsh-wechat/errors?t=<令牌>` 由 `lib/errorspage.js` 服务端渲染（无客户端脚本，所有文本 HTML 转义），令牌与扫码页同源；
+- **接口**：`GET /dsh-wechat/api/errors`（回环、无令牌）返回 `{ retentionDays, count, entries }`；
+- **卡片**：不再渲染错误正文，只在 `errorCount > 0` 时显示「错误日志（N）」链接（`errorsUrl` 带令牌）；
+- **命令**：`/errors` 打印最近 10 条（仅所有者）。
+
 ## 渲染
 
 - **表格**（`renderTable()`）：`/status` 输出 **Markdown 表格**——微信会渲染它，所以不需要自己画框线，也**不需要按中文双宽补空格**（对齐由渲染器负责）。单元格里的 `|` 转义成 `\|`、换行折成空格，避免破坏表格结构；放不进单元格的长内容（最近错误原文）写在表格下方。

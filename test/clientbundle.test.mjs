@@ -109,10 +109,13 @@ test('the card maps every host status onto a label and a tone', async () => {
   assert.equal(stale.pageUrl, '/dsh-wechat/?t=tok')
   assert.equal(stale.canAdd, true)
 
-  const failed = describe({ phase: 'failed', lastError: 'ret=-14' })
+  // Failures are a pointer now: the message itself lives on the log page.
+  const failed = describe({ phase: 'failed', errorsUrl: '/dsh-wechat/errors?t=tok', errorCount: 3 })
   assert.equal(failed.tone, 'err')
   assert.equal(failed.label, '登录失败')
-  assert.equal(failed.lastError, 'ret=-14')
+  assert.equal(failed.errorsUrl, '/dsh-wechat/errors?t=tok')
+  assert.equal(failed.errorCount, 3)
+  assert.equal(failed.lastError, undefined, 'the card no longer carries the error text')
 
   assert.equal(describe({}).label, '未绑定')
   assert.equal(describe({ hasQr: false }).canRefresh, false, 'no refresh button without a code')
@@ -138,7 +141,8 @@ test('the rendered card lists every bot and offers «添加绑定»', async () =
       qrUrl: null,
       pageUrl: '/dsh-wechat/?t=tok',
       version: '0.2.2',
-      lastError: null,
+      errorsUrl: '/dsh-wechat/errors?t=tok',
+      errorCount: 2,
     } : initial, () => {}],
     useCallback: (fn) => fn,
     useEffect: () => {},
@@ -178,5 +182,16 @@ test('the rendered card lists every bot and offers «添加绑定»', async () =
   assert.ok(texts.includes('离线'), 'offline bots get one too')
   assert.ok(texts.includes('已连接 1/2'), 'the header counts the online bots')
   assert.ok(buttons.includes('添加绑定'), 'the add action is offered')
+  const links = []
+  const walkLinks = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) return node.forEach(walkLinks)
+    if (node.type === 'a' && node.props?.href) links.push({ href: node.props.href, text: node.children.join('') })
+    for (const child of node.children ?? []) walkLinks(child)
+  }
+  walkLinks(tree)
+  const logLink = links.find((link) => link.href.startsWith('/dsh-wechat/errors'))
+  assert.ok(logLink, 'the card links to the error log')
+  assert.match(logLink.text, /错误日志（2）/, 'the link carries the entry count')
   assert.ok(!buttons.includes('刷新二维码'), 'no refresh without a pending code')
 })
