@@ -153,6 +153,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 | 长轮询 | `WechatChannel` 每 bot 一个实例（`botId` 构造参数），各自的 client、cursor、去重窗口 |
 | 投递 | 会话键 → bot → `bridge.#clientFor(bot)`；`contextToken` 按 bot 取，回复不会串号 |
 | 登录 | 由插件编排（`startLogin`），一次一个；`/api/add` 触发，成功后 `startBot(credentials.botId)`，已有通道不受影响。每次尝试有独立 `AbortController` 与 **300 秒**上限（`loginTimeoutSeconds`）：超时/失败都会写入错误日志、把页面置为 `failed`，并释放「添加绑定」（否则卡片永远停在「添加中…」且 `/api/add` 一直 409） |
+| 昵称 | 官方协议不提供显示名（QR 状态只有 `ilink_bot_id`/`ilink_user_id`），所以 `credentials.bots[id].label` 是本地的：`POST /api/rename?bot=&label=` 写入，留空回到 `微信机器人 <id 尾 4 位>`；`saveCredentials` 合并时保留 label，重新扫码不会丢名字 |
 | 所有者 | 权限判断用**该会话所属 bot** 的 `ownerUserId`（`checkAccess` 的 per-bot 覆盖、`/status` 与欢迎语的 `isOwner`、`maySendTo` 的允许名单），配置里的 `ownerUserId` 仅作兜底；否则第二只 bot 由别人扫码时会被默认的 allowlist 拒掉 |
 | 兼容 | store 的 `credentials`/`cursor`/`hasSeen`/`contextTokenFor` 在不传 bot 时回落到主 bot；未绑定任何 bot 时回落到 v1 顶层字段（测试与首次登录前状态） |
 
@@ -171,7 +172,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - `apply(ctx)` → `ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'dsh-wechat', order:45, label:'微信' }, WechatSection))`；
 - 组件只用 `react.createElement`（不引入 `@deepseek-ai` 运行时包，无构建步骤），每 4 秒轮询宿主接口渲染状态；
 - **二维码内联绘制**：`GET /dsh-wechat/api/qr` 返回 `{ version, svg }`（与终端渲染同一套矩阵），卡片把这段 SVG 直接插入 DOM —— 不依赖 `<img>` 加载、样式表或主题，这才算“直接显示在插件上”；`/api/qr.svg` 保留给浏览器直接访问；
-- 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,logout,errors}` 与错误日志页 `/dsh-wechat/errors`（**没有独立扫码页**，也不自开监听端口）：`status` 返回连接/阶段/`qrUrl`/版本/最近错误，`qr` 返回 `{version, svg}` 供卡片内联绘制，`refresh` 置 `qrState.restartRequested` 让登录流换一张码；
+- 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,rename,logout,errors}` 与错误日志页 `/dsh-wechat/errors`（**没有独立扫码页**，也不自开监听端口）：`status` 返回连接/阶段/`qrUrl`/版本/最近错误，`qr` 返回 `{version, svg}` 供卡片内联绘制，`refresh` 置 `qrState.restartRequested` 让登录流换一张码；
 - **边界**：这些接口不带令牌（回环地址信任），与同类微信插件一致；本地进程因此可以读到二维码——等于可以抢绑，已写进已知限制。旧版的一次性令牌随扫码页一起删除了。
 
 ## 错误日志
@@ -269,7 +270,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 245 个用例：单元 + 协议 + 桥接 + 交互时序 + 多 bot + 错误日志 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 247 个用例：单元 + 协议 + 桥接 + 交互时序 + 多 bot + 错误日志 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |

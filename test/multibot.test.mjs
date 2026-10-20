@@ -187,3 +187,30 @@ test('the owner of a bot is the account that scanned it, not the first bot\'s ow
     await temp.cleanup()
   }
 })
+
+test('bots get a readable local label, and renaming survives a re-bind', async () => {
+  const temp = await createTempStore()
+  try {
+    await temp.store.saveCredentials('ba14a551405a@im.bot', { botToken: 'ta', botId: 'ba14a551405a@im.bot' })
+    // The API exposes no display name, so the default is derived from the id.
+    assert.equal(temp.store.labelFor('ba14a551405a@im.bot'), '微信机器人 405a')
+
+    assert.equal(await temp.store.setBotLabel('ba14a551405a@im.bot', '  接待号  '), '接待号')
+    await temp.store.flush()
+    const onDisk = JSON.parse(await readFile(temp.store.paths.credentials, 'utf8'))
+    assert.equal(onDisk.bots['ba14a551405a@im.bot'].label, '接待号')
+
+    // Re-scanning the same bot replaces the token but keeps the name.
+    await temp.store.saveCredentials('ba14a551405a@im.bot', { botToken: 'ta2', botId: 'ba14a551405a@im.bot' })
+    assert.equal(temp.store.labelFor('ba14a551405a@im.bot'), '接待号')
+    assert.equal(temp.store.credentialsFor('ba14a551405a@im.bot').botToken, 'ta2')
+
+    // Empty clears it back to the derived form; control characters never land.
+    assert.equal(await temp.store.setBotLabel('ba14a551405a@im.bot', '  '), '微信机器人 405a')
+    assert.equal(await temp.store.setBotLabel('ba14a551405a@im.bot', 'a\u0000b'), 'ab')
+    assert.equal(await temp.store.setBotLabel('ba14a551405a@im.bot', 'x'.repeat(40)).then((label) => label.length), 24)
+    await assert.rejects(() => temp.store.setBotLabel('nope@im.bot', 'x'), /未知 bot/)
+  } finally {
+    await temp.cleanup()
+  }
+})

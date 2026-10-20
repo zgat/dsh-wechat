@@ -3286,7 +3286,8 @@ test('/status reports how many bots are bound and which one owns the chat', asyn
     await env.bridge.handleInbound(inboundMessage({ text: '/status' }))
     const status = await waitFor(() => env.client.sent.map((entry) => entry.text).find((text) => /📊 状态/.test(text)))
     assert.match(status, /共 2 只（在线 1）/, 'the bound/online counts are visible')
-    assert.match(status, /本会话 a@im\.bot/, 'the chat names the bot that owns it')
+    // The chat names the bot by its readable label; the raw id is what the label derives from.
+    assert.match(status, /本会话 微信机器人 a/, 'the chat names the bot that owns it')
   } finally {
     await env.cleanup()
   }

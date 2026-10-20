@@ -132,8 +132,8 @@ test('the rendered card lists every bot and offers «添加绑定»', async () =
     createElement,
     useState: (initial) => [hooks++ === 0 ? {
       bots: [
-        { botId: 'a@im.bot', connected: true, ownerUserId: 'owner@im.wechat' },
-        { botId: 'b@im.bot', connected: false },
+        { botId: 'a@im.bot', label: '接待号', connected: true, ownerUserId: 'owner@im.wechat' },
+        { botId: 'b@im.bot', label: '测试号', connected: false },
       ],
       adding: false,
       hasQr: false,
@@ -174,13 +174,16 @@ test('the rendered card lists every bot and offers «添加绑定»', async () =
   }
   walk(tree)
 
-  assert.ok(texts.includes('a@im.bot'), 'bot A is listed')
-  assert.ok(texts.includes('b@im.bot'), 'bot B is listed')
+  assert.ok(texts.includes('接待号'), 'bots are listed by their readable label')
+  assert.ok(texts.includes('测试号'), 'each label is rendered')
+  assert.ok(texts.includes('a@im.bot'), 'the raw id stays visible as secondary text')
+  assert.ok(texts.includes('b@im.bot'), 'both ids are shown')
   assert.ok(texts.includes('在线'), 'online bots get a badge')
   assert.ok(texts.includes('离线'), 'offline bots get one too')
   assert.ok(texts.includes('已连接 1/2'), 'the header counts the online bots')
   assert.ok(buttons.includes('添加绑定'), 'the add action is offered')
   assert.ok(buttons.includes('解绑'), 'each bot can be unbound from the card')
+  assert.ok(buttons.includes('改名'), 'and renamed')
   const links = []
   const walkLinks = (node) => {
     if (!node || typeof node !== 'object') return

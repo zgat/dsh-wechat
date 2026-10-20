@@ -121,7 +121,7 @@ async function commandStatus(flags) {
     const credential = store.credentialsFor(botId)
     const cursor = store.cursorFor(botId)
     console.log(
-      `    · ${botId}（来源 ${credential.source ?? 'file'}，基座 ${credential.baseUrl ?? DEFAULT_BASE_URL}，` +
+      `    · ${store.labelFor(botId)}（${botId}；来源 ${credential.source ?? 'file'}，基座 ${credential.baseUrl ?? DEFAULT_BASE_URL}，` +
         `用户 ${credential.ownerUserId ?? 'unknown'}，游标 ${cursor ? `${cursor.slice(0, 18)}…` : '空'}）`,
     )
   }

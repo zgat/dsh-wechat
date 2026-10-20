@@ -544,3 +544,73 @@ test('a bot can be unbound from the settings API without touching the others', a
     await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }
 })
+
+test('the card can rename a bot, and the label reaches /api/status', async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-rename-'))
+  const gateway = await startGateway()
+  await writeFile(
+    path.join(stateDir, 'credentials.json'),
+    JSON.stringify({
+      version: 2,
+      bots: { 'ba14a551405a@im.bot': { version: 1, botToken: 'token-a', botId: 'ba14a551405a@im.bot', baseUrl: gateway.baseUrl, source: 'file' } },
+    }),
+  )
+
+  const root = new Context()
+  const ctx = root.isolate?.() ?? root
+  const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
+  ctx.provide('agents', harness.registry)
+  ctx.provide('sessions', { list: () => [], get: () => undefined })
+  ctx.provide('tools', { register: () => () => {} })
+  const routes = []
+  ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
+
+  const fiber = ctx.plugin(plugin, {
+    stateDir,
+    accessPolicy: 'open',
+    typing: false,
+    progress: 'off',
+    logLevel: 'silent',
+    qrInCard: true,
+    autoLogin: false,
+    baseUrl: gateway.baseUrl,
+  })
+
+  const call = async (target, options = {}) =>
+    new Promise((resolve) => {
+      const response = {
+        statusCode: null,
+        headers: null,
+        body: '',
+        writeHead(status, headers) { this.statusCode = status; this.headers = headers },
+        end(body) { this.body = body ?? ''; resolve(this) },
+      }
+      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+    })
+
+  try {
+    await waitFor(() => routes.length === 1, { timeoutMs: 8_000, label: 'route' })
+    const before = JSON.parse((await call('/dsh-wechat/api/status')).body)
+    assert.equal(before.bots[0].label, '微信机器人 405a', 'the default label is readable')
+
+    assert.equal((await call('/dsh-wechat/api/rename?bot=ba14a551405a@im.bot&label=x')).statusCode, 405)
+    assert.equal((await call('/dsh-wechat/api/rename?bot=nope@im.bot&label=x', { method: 'POST' })).statusCode, 404)
+
+    const renamed = await call('/dsh-wechat/api/rename?bot=ba14a551405a@im.bot&label=' + encodeURIComponent('接待号'), { method: 'POST' })
+    assert.equal(renamed.statusCode, 200)
+    assert.equal(JSON.parse(renamed.body).label, '接待号')
+
+    const after = JSON.parse((await call('/dsh-wechat/api/status')).body)
+    assert.equal(after.bots[0].label, '接待号')
+    const onDisk = JSON.parse(await readFile(path.join(stateDir, 'credentials.json'), 'utf8'))
+    assert.equal(onDisk.bots['ba14a551405a@im.bot'].label, '接待号')
+  } finally {
+    try {
+      await fiber?.dispose?.()
+    } catch {
+      // Assertions above own the failures.
+    }
+    await gateway.close()
+    await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})
