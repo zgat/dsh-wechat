@@ -170,6 +170,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 - `apply(ctx)` → `ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'dsh-wechat', order:45, label:'微信' }, WechatSection))`；
 - 组件只用 `react.createElement`（不引入 `@deepseek-ai` 运行时包，无构建步骤），每 4 秒轮询宿主接口渲染状态；
+- **二维码内联绘制**：`GET /dsh-wechat/api/qr` 返回 `{ version, svg }`（与扫码页同一渲染器），卡片把这段 SVG 直接插入 DOM —— 不依赖 `<img>` 加载、样式表或主题，这才算“直接显示在插件上”；`/api/qr.svg` 保留给浏览器直接访问；
 - 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr.svg,refresh}`：`status` 返回连接/阶段/`qrUrl`/`pageUrl`/版本/最近错误，`qr.svg` 复用扫码页同一套矩阵渲染，`refresh` 置 `loginPage.restartRequested` 让登录流换一张码；
 - **边界**：这三个 API 不带令牌（回环地址信任），与同类微信插件一致；完整扫码页与 `/state.json` 仍要求一次性令牌。本地进程因此可以读到二维码——等于可以抢绑，这一点写进已知限制。
 

@@ -444,6 +444,14 @@ test('the scan page is also served from the harness web server when one exists',
     assert.match(statusBody.qrUrl, /^\/dsh-wechat\/api\/qr\.svg\?v=/)
     assert.ok(statusBody.pageUrl.includes('t='), 'the card can open the tokenised page')
 
+    // The card draws the code itself from this payload: no <img>, no stylesheet.
+    const qrPayload = await call('/dsh-wechat/api/qr')
+    assert.equal(qrPayload.statusCode, 200)
+    const qrBody = JSON.parse(qrPayload.body)
+    assert.equal(qrBody.ok, true)
+    assert.ok(qrBody.version, 'the payload carries a version for cache busting')
+    assert.match(qrBody.svg, /^<svg xmlns/, 'and the markup the card renders')
+
     const qr = await call('/dsh-wechat/api/qr.svg')
     assert.equal(qr.statusCode, 200)
     assert.match(qr.headers['Content-Type'], /image\/svg\+xml/)
