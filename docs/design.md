@@ -171,7 +171,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - `apply(ctx)` → `ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'dsh-wechat', order:45, label:'微信' }, WechatSection))`；
 - 组件只用 `react.createElement`（不引入 `@deepseek-ai` 运行时包，无构建步骤），每 4 秒轮询宿主接口渲染状态；
 - **二维码内联绘制**：`GET /dsh-wechat/api/qr` 返回 `{ version, svg }`（与终端渲染同一套矩阵），卡片把这段 SVG 直接插入 DOM —— 不依赖 `<img>` 加载、样式表或主题，这才算“直接显示在插件上”；`/api/qr.svg` 保留给浏览器直接访问；
-- 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,errors}` 与错误日志页 `/dsh-wechat/errors`（**没有独立扫码页**，也不自开监听端口）：`status` 返回连接/阶段/`qrUrl`/版本/最近错误，`qr` 返回 `{version, svg}` 供卡片内联绘制，`refresh` 置 `qrState.restartRequested` 让登录流换一张码；
+- 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,logout,errors}` 与错误日志页 `/dsh-wechat/errors`（**没有独立扫码页**，也不自开监听端口）：`status` 返回连接/阶段/`qrUrl`/版本/最近错误，`qr` 返回 `{version, svg}` 供卡片内联绘制，`refresh` 置 `qrState.restartRequested` 让登录流换一张码；
 - **边界**：这些接口不带令牌（回环地址信任），与同类微信插件一致；本地进程因此可以读到二维码——等于可以抢绑，已写进已知限制。旧版的一次性令牌随扫码页一起删除了。
 
 ## 错误日志
@@ -182,7 +182,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - **合并**：与上一条内容相同且 60 秒内的，只更新时间并把 `count` 加一（重试阶梯会让同一错误连刷数次）；
 - **页面**：`GET /dsh-wechat/errors` 由 `lib/errorspage.js` 服务端渲染（无客户端脚本，所有文本 HTML 转义），回环地址、不带令牌；
 - **接口**：`GET /dsh-wechat/api/errors`（回环、无令牌）返回 `{ retentionDays, count, entries }`；
-- **卡片**：不再渲染错误正文，只在 `errorCount > 0` 时显示「错误日志（N）」链接（`errorsUrl` 带令牌）；
+- **卡片**：不再渲染错误正文，只在 `errorCount > 0` 时显示「错误日志（N）」链接；每只 bot 有「解绑」按钮（`POST /api/logout?bot=`，宿主先停该 bot 的通道再删凭据，其它 bot 不受影响）；二维码未取到时显示转圈占位，尺寸与二维码一致，避免布局跳动；
 - **命令**：`/errors` 打印最近 10 条（仅所有者）。
 
 ## 渲染
@@ -269,7 +269,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 243 个用例：单元 + 协议 + 桥接 + 交互时序 + 多 bot + 错误日志 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 245 个用例：单元 + 协议 + 桥接 + 交互时序 + 多 bot + 错误日志 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |

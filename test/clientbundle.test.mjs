@@ -180,6 +180,7 @@ test('the rendered card lists every bot and offers «添加绑定»', async () =
   assert.ok(texts.includes('离线'), 'offline bots get one too')
   assert.ok(texts.includes('已连接 1/2'), 'the header counts the online bots')
   assert.ok(buttons.includes('添加绑定'), 'the add action is offered')
+  assert.ok(buttons.includes('解绑'), 'each bot can be unbound from the card')
   const links = []
   const walkLinks = (node) => {
     if (!node || typeof node !== 'object') return
@@ -192,4 +193,47 @@ test('the rendered card lists every bot and offers «添加绑定»', async () =
   assert.ok(logLink, 'the card links to the error log')
   assert.match(logLink.text, /错误日志（2）/, 'the link carries the entry count')
   assert.ok(!buttons.includes('刷新二维码'), 'no refresh without a pending code')
+})
+
+test('while the code is being fetched the card spins instead of showing a blank box', async () => {
+  const { loaded } = await loadClientModule()
+  let hooks = 0
+  const react = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: (initial) => [hooks++ === 0 ? {
+      bots: [{ botId: 'a@im.bot', connected: true }],
+      adding: true,
+      hasQr: true,
+      // The markup has not arrived yet: that is exactly the frame that used to look empty.
+      qrUrl: '/dsh-wechat/api/qr.svg?v=abc',
+      errorsUrl: null,
+      errorCount: 0,
+    } : initial, () => {}],
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+  }
+
+  let section = null
+  loaded.factory(() => react).apply({
+    slots: { inject: (name, factory) => factory(), register: (meta, component) => { section = component } },
+  })
+  const tree = section()
+
+  const classes = []
+  const texts = []
+  const visit = (node) => {
+    if (node === null || node === undefined || typeof node === 'boolean') return
+    if (typeof node === 'string' || typeof node === 'number') {
+      texts.push(String(node))
+      return
+    }
+    if (Array.isArray(node)) return node.forEach(visit)
+    if (node.props?.className) classes.push(String(node.props.className))
+    for (const child of node.children ?? []) visit(child)
+  }
+  visit(tree)
+
+  assert.ok(classes.includes('dw_spinner'), 'a spinner is rendered while the SVG is missing')
+  assert.ok(classes.includes('dw_spin'), 'it sits in a box the size of the code, so nothing jumps when it arrives')
+  assert.ok(texts.includes('正在获取二维码…'), 'and it says what is happening')
 })

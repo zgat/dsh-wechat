@@ -458,3 +458,89 @@ test('while adding a bot the QR stays visible even though another bot is connect
     await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }
 })
+
+test('a bot can be unbound from the settings API without touching the others', async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-unbind-'))
+  const gA = await startGateway()
+  const gB = await startGateway()
+  await writeFile(
+    path.join(stateDir, 'credentials.json'),
+    JSON.stringify({
+      version: 2,
+      bots: {
+        'bot-a@im.bot': { version: 1, botToken: 'token-a', botId: 'bot-a@im.bot', baseUrl: gA.baseUrl, source: 'file' },
+        'bot-b@im.bot': { version: 1, botToken: 'token-b', botId: 'bot-b@im.bot', baseUrl: gB.baseUrl, source: 'file' },
+      },
+    }),
+  )
+
+  const root = new Context()
+  const ctx = root.isolate?.() ?? root
+  const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
+  ctx.provide('agents', harness.registry)
+  ctx.provide('sessions', { list: () => [], get: () => undefined })
+  ctx.provide('tools', { register: () => () => {} })
+  const routes = []
+  ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
+
+  const fiber = ctx.plugin(plugin, {
+    stateDir,
+    accessPolicy: 'open',
+    typing: false,
+    progress: 'off',
+    logLevel: 'silent',
+    qrInCard: true,
+    autoLogin: false,
+  })
+
+  const call = async (target, options = {}) =>
+    new Promise((resolve) => {
+      const response = {
+        statusCode: null,
+        headers: null,
+        body: '',
+        writeHead(status, headers) { this.statusCode = status; this.headers = headers },
+        end(body) { this.body = body ?? ''; resolve(this) },
+      }
+      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+    })
+
+  try {
+    await waitFor(() => gA.state.polls > 0 && gB.state.polls > 0 && routes.length === 1, {
+      timeoutMs: 8_000,
+      label: 'both bots polling',
+    })
+
+    // Wrong method and unknown bot are refused rather than guessed.
+    assert.equal((await call('/dsh-wechat/api/logout')).statusCode, 405)
+    assert.equal((await call('/dsh-wechat/api/logout?bot=nope@im.bot', { method: 'POST' })).statusCode, 404)
+
+    const unbind = await call('/dsh-wechat/api/logout?bot=bot-a@im.bot', { method: 'POST' })
+    assert.equal(unbind.statusCode, 200)
+    const body = JSON.parse(unbind.body)
+    assert.equal(body.ok, true)
+    assert.deepEqual(body.bots, ['bot-b@im.bot'], 'only the other bot remains')
+
+    // The credential is gone from disk and from the card's list.
+    const onDisk = JSON.parse(await readFile(path.join(stateDir, 'credentials.json'), 'utf8'))
+    assert.deepEqual(Object.keys(onDisk.bots), ['bot-b@im.bot'])
+    const status = JSON.parse((await call('/dsh-wechat/api/status')).body)
+    assert.deepEqual(status.bots.map((bot) => bot.botId), ['bot-b@im.bot'])
+
+    // A's loop stops; B keeps polling.
+    const stopped = gA.state.polls
+    const bBefore = gB.state.polls
+    await new Promise((resolve) => setTimeout(resolve, 1_200))
+    assert.equal(gA.state.polls, stopped, 'the unbound bot stopped polling')
+    assert.ok(gB.state.polls > bBefore, 'the remaining bot did not')
+  } finally {
+    try {
+      await fiber?.dispose?.()
+    } catch {
+      // Assertions above own the failures.
+    }
+    await gA.close()
+    await gB.close()
+    await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+  }
+})
