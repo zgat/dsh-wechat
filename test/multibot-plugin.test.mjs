@@ -58,7 +58,7 @@ test('two bots in one instance answer through their own gateway', async () => {
     typing: false,
     progress: 'off',
     logLevel: 'silent',
-    loginPage: false,
+    qrInCard: false,
     autoLogin: false,
   })
 
@@ -159,8 +159,7 @@ test('adding a bot at runtime leaves the running bot polling', async () => {
     progress: 'off',
     logLevel: 'silent',
     // `loginPage: true` is what registers the settings API; port 0 keeps tests isolated.
-    loginPage: true,
-    loginPagePort: 0,
+    qrInCard: true,
     autoLogin: false,
     baseUrl: gLogin.baseUrl,
   })
@@ -250,8 +249,7 @@ test('re-scanning an already running bot replaces its channel and token', async 
     typing: false,
     progress: 'off',
     logLevel: 'silent',
-    loginPage: true,
-    loginPagePort: 0,
+    qrInCard: true,
     autoLogin: false,
     baseUrl: gLogin.baseUrl,
   })
@@ -327,8 +325,7 @@ test('a login nobody completes times out, says so, and frees the add button', as
     typing: false,
     progress: 'off',
     logLevel: 'silent',
-    loginPage: true,
-    loginPagePort: 0,
+    qrInCard: true,
     autoLogin: false,
     baseUrl: gLogin.baseUrl,
     // Short enough for a test, long enough for the QR request to land.
@@ -408,8 +405,7 @@ test('while adding a bot the QR stays visible even though another bot is connect
     typing: false,
     progress: 'off',
     logLevel: 'silent',
-    loginPage: true,
-    loginPagePort: 0,
+    qrInCard: true,
     autoLogin: false,
     baseUrl: gLogin.baseUrl,
   })

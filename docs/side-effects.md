@@ -8,7 +8,7 @@
 
 | 项目 | 事实 | 约束 |
 | --- | --- | --- |
-| 子进程 | **无**：插件不启动任何程序（不打开浏览器、不执行 shell）；扫码页只打印地址 | `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不导入子进程 API |
+| 子进程 | **无**：插件不启动任何程序（不打开浏览器、不执行 shell）；设置页卡片接口只打印地址 | `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不导入子进程 API |
 | 其它进程 | 无 `exec`/`execFile`/`fork`/`osascript`/`defaults`/`plutil` | 断言：运行时不导入任何子进程 API |
 | 进程生命周期 | 不调用 `process.exit()`；不注册信号处理（CLI 除外，且在自己的 `finally` 里 `off`） | 断言：全仓禁止 `process.exit(` |
 
@@ -18,7 +18,7 @@
 
 | 项目 | 事实 | 约束 |
 | --- | --- | --- |
-| 监听 | **一个** HTTP server：扫码页，`loginPagePort`（默认 30989） | 显式绑定 `127.0.0.1`，从不 0.0.0.0；端口被占用时回退到系统分配 |
+| 监听 | **一个** HTTP server：设置页卡片接口，`loginPagePort`（默认 30989） | 显式绑定 `127.0.0.1`，从不 0.0.0.0；端口被占用时回退到系统分配 |
 | GUI 集成 | 复用宿主已有的 web server，注册 `prefix /dsh-wechat` 路由 | 不新开端口；一次性令牌校验（字节级常量时间比较），非 GET/HEAD 返回 405 |
 | 出站长连接 | 长轮询 `getupdates` 常驻一条 TCP（约 35 秒一轮，服务端挂起） | 这是协议要求；socket 随 `stop()` 关闭 |
 | 连接池 | 使用全局 `fetch`（undici），默认 keep-alive 复用连接 | 短时残留连接属正常行为，不产生额外监听 |
@@ -30,7 +30,7 @@
 ```
 credentials.json   0600   机器人 bearer 凭据
 state.json         0600   游标 / 会话映射 / 已见消息 / context_token / 统计
-login-page.url     0600   扫码页地址（含一次性令牌）
+login-page.url     0600   设置页卡片接口地址（含一次性令牌）
 login-qrcode.svg   0600   登录二维码
 login-qrcode.txt   0600   同上（字符画）
 state.json.<pid>.<ts>.tmp  写入中间态，随写随改名
@@ -98,5 +98,5 @@ media/<日期>/<时间>-<名>   0600，入站附件解密后的落盘位置
 ```sh
 node --test test/sideeffects.test.mjs      # 7 条副作用预算断言
 node -e "import('./lib/channel.js').then(m => console.log(m.openInBrowser('')))"   # false，且无弹窗
-lsof -nP -iTCP -sTCP:LISTEN | grep -i node # 只应看到回环上的扫码页端口
+lsof -nP -iTCP -sTCP:LISTEN | grep -i node # 只应看到回环上的设置页卡片接口端口
 ```

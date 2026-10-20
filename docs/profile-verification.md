@@ -35,7 +35,7 @@ bash scripts/verify-profile-boot.sh          # 启动（真实 host，OS 分配�
 
 - `hostHttp: 303`：宿主对自己的 URL 给出 HTTP 应答（303 来自浏览器信任围栏），说明 HTTP 载体确实起来了；
 - `pluginRouteNoToken: 403`：`/dsh-wechat/` 不带一次性令牌被拒——这个状态只可能由本插件的路由给出，等价于"插件已在该宿主内挂载"；
-- `pluginPageWithToken: 200`：带令牌时同一条路由返回扫码页 HTML，证明插件在宿主里是**活着并且在服务**的。
+- `pluginPageWithToken: 200`：带令牌时同一条路由返回设置页卡片接口 HTML，证明插件在宿主里是**活着并且在服务**的。
 
 ## manifest 契约（同一次验证中读取）
 

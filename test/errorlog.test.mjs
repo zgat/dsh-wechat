@@ -68,19 +68,17 @@ test('the log page lists entries and escapes what it renders', () => {
       { at: '2026-10-19T08:00:00.000Z', message: '回复仍有 2 段未能发出 <script>alert(1)</script>', count: 3 },
     ],
   }
-  const html = renderErrorLogPage({ store, loginPage: { preferredUrl: '/dsh-wechat/?t=tok' }, config: { errorLogDays: 30, errorLogEntries: 300 } })
+  const html = renderErrorLogPage({ store, config: { errorLogDays: 30, errorLogEntries: 300 } })
   assert.match(html, /错误日志/)
   assert.match(html, /保留最近 30 天/)
   assert.ok(html.includes('&lt;script&gt;'), 'the message is escaped')
   assert.ok(!html.includes('<script>alert(1)</script>'), 'no markup from the message reaches the page')
   assert.ok(html.includes('×3'), 'the repeat count is shown')
-  assert.match(html, /href="\/dsh-wechat\/\?t=tok"/, 'there is a way back to the scan page')
 })
 
 test('an empty log says so instead of rendering an empty table', () => {
   const html = renderErrorLogPage({
     store: { errorsFor: () => [] },
-    loginPage: { preferredUrl: null },
     config: { errorLogDays: 7, errorLogEntries: 50 },
   })
   assert.match(html, /最近没有记录到错误/)

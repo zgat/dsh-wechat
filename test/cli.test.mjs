@@ -19,24 +19,29 @@ import { startGateway, waitFor } from './helpers.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(here, '..', 'bin', 'dsh-wechat.mjs')
 
-test('flags are parsed for every documented option', () => {
-  assert.deepEqual(parseFlags([]), { flags: {}, rest: [] })
-  assert.deepEqual(parseFlags(['--page']), { flags: { page: true }, rest: [] })
-  assert.deepEqual(parseFlags(['--page', '--no-open', '--port', '30989']), {
-    flags: { page: true, noOpen: true, port: 30989 },
-    rest: [],
-  })
+test('flags are parsed for every documented option, and the rest are reported', () => {
+  assert.deepEqual(parseFlags([]), { flags: {}, rest: [], unknown: [] })
+  assert.deepEqual(parseFlags(['state-dir', '/tmp/x']), { flags: {}, rest: ['state-dir', '/tmp/x'], unknown: [] })
   assert.deepEqual(parseFlags(['--state-dir', '/tmp/x', '--base-url', 'http://127.0.0.1:1']), {
     flags: { stateDir: '/tmp/x', baseUrl: 'http://127.0.0.1:1' },
     rest: [],
+    unknown: [],
   })
-  // A value flag without a value must not swallow the next flag: the person
-  // forgot the directory, and --page still has to work.
-  assert.deepEqual(parseFlags(['--state-dir', '--page']), { flags: { page: true }, rest: [] })
+  // A value flag without a value must not swallow the next flag: the person forgot the
+  // directory, and the next flag still has to be read as a flag.
+  assert.deepEqual(parseFlags(['--state-dir', '--base-url', 'http://x']), {
+    flags: { baseUrl: 'http://x' },
+    rest: [],
+    unknown: [],
+  })
   assert.deepEqual(parseFlags(['send', 'user@im.wechat', '你好', '世界']), {
     flags: {},
     rest: ['send', 'user@im.wechat', '你好', '世界'],
+    unknown: [],
   })
+  // The removed scan-page flags are reported instead of silently doing nothing.
+  assert.deepEqual(parseFlags(['--page', '--no-open']), { flags: {}, rest: [], unknown: ['--page', '--no-open'] })
+  assert.deepEqual(parseFlags(['--port', '30989']), { flags: {}, rest: ['30989'], unknown: ['--port'] })
 })
 
 test('`qr` renders without touching the network or the state directory', async () => {
@@ -69,16 +74,14 @@ test('`status` reports an unbound state without creating credentials', async () 
   }
 })
 
-test('`login --page` serves a scan page and stores the credential on confirmation', async () => {
+test('`login` renders the code in the terminal and stores the credential on confirmation', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-cli-login-'))
   const gateway = await startGateway()
   let child
   try {
-    child = spawn(
-      process.execPath,
-      [CLI, 'login', '--state-dir', dir, '--base-url', gateway.baseUrl, '--page', '--port', '0'],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    )
+    child = spawn(process.execPath, [CLI, 'login', '--state-dir', dir, '--base-url', gateway.baseUrl], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => {
@@ -89,46 +92,16 @@ test('`login --page` serves a scan page and stores the credential on confirmatio
     })
     const exited = new Promise((resolve) => child.on('close', resolve))
 
-    // The page announces itself on stdout and writes its URL for later.
-    await waitFor(() => /扫码页：http:\/\/127\.0\.0\.1:\d+\/t\/[0-9a-f]+\//.test(stdout), {
-      timeoutMs: 10_000,
-      label: 'page url on stdout',
-    })
-    const url = /扫码页：(http:\/\/127\.0\.0\.1:\d+\/t\/[0-9a-f]+\/)/.exec(stdout)[1]
-    // The banner is printed right after the page resolves, so wait for it rather
-    // than racing the child's stdout.
-    await waitFor(() => stdout.includes('请在浏览器里打开上面的地址扫码'), {
-      timeoutMs: 5_000,
-      label: 'scan page banner',
-    })
+    // The code is drawn where the command runs: there is no page to open any more.
+    await waitFor(() => /扫码登录|微信扫码|二维码/.test(stdout), { timeoutMs: 10_000, label: 'terminal qr' })
+    assert.equal(stdout.includes('扫码页'), false, 'the page banner is gone')
+    assert.equal(existsSync(path.join(dir, 'login-page.url')), false, 'no page URL is written')
 
-    const urlFile = path.join(dir, 'login-page.url')
-    await waitFor(() => existsSync(urlFile), { timeoutMs: 5_000, label: 'url file' })
-    assert.equal((await readFile(urlFile, 'utf8')).trim(), url)
-
-    const state = await waitFor(
-      async () => {
-        const response = await fetch(`${url}state.json`)
-        if (!response.ok) return false
-        const snapshot = await response.json()
-        // The page starts before the first QR is issued, so wait for the code.
-        return snapshot.hasQr ? snapshot : false
-      },
-      { timeoutMs: 8_000, label: 'page state with a scan code' },
-    )
-    assert.equal(state.phase, 'waiting')
-    assert.equal(state.botId, null)
-    const html = await (await fetch(url)).text()
-    assert.ok(html.includes('<svg'))
-
-    // The QR files also land in the state directory (this used to fail with
-    // ENOENT because nothing had created the directory yet).
-    await waitFor(() => existsSync(path.join(dir, 'login-qrcode.svg')), { timeoutMs: 5_000, label: 'qr svg file' })
+    // The QR files still land in the state directory (this used to fail with ENOENT
+    // because nothing had created the directory yet).
+    await waitFor(() => existsSync(path.join(dir, 'login-qrcode.svg')), { timeoutMs: 8_000, label: 'qr svg file' })
     const svg = await readFile(path.join(dir, 'login-qrcode.svg'), 'utf8')
     assert.match(svg, /^<svg xmlns/)
-
-    // Wording is only revealed after login, so it must not leak into the page.
-    assert.ok(!html.includes('token-from-qr'))
 
     gateway.state.qrPhase = 'confirmed'
     const code = await exited
@@ -138,6 +111,11 @@ test('`login --page` serves a scan page and stores the credential on confirmatio
     const stored = JSON.parse(await readFile(path.join(dir, 'credentials.json'), 'utf8'))
     assert.equal(stored.version, 2)
     assert.equal(stored.bots['bot-qr@im.bot'].botToken, 'token-from-qr')
+
+    // The old flag is gone for good: it is rejected rather than silently ignored.
+    const rejected = spawn(process.execPath, [CLI, 'login', '--state-dir', dir, '--page'], { stdio: 'ignore' })
+    const rejectedCode = await new Promise((resolve) => rejected.on('close', resolve))
+    assert.notEqual(rejectedCode, 0, '--page is no longer a flag')
   } finally {
     child?.kill('SIGKILL')
     await gateway.close()

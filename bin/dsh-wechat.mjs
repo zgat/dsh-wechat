@@ -18,7 +18,6 @@ import { parseFlags } from '../lib/cli-flags.js'
 import { normalizeConfig } from '../lib/config.js'
 import { DEFAULT_BASE_URL, DEFAULT_CDN_BASE_URL, ILinkClient } from '../lib/ilink/api.js'
 import { qrLogin } from '../lib/login.js'
-import { LoginPage } from '../lib/loginpage.js'
 import { createLogger } from '../lib/log.js'
 import { encodeQrMatrix, renderQrText } from '../lib/qr.js'
 import { WechatStore, resolvePaths } from '../lib/store.js'
@@ -26,8 +25,8 @@ import { WechatStore, resolvePaths } from '../lib/store.js'
 const HELP = `dsh-wechat — 微信（腾讯 iLink / ClawBot）接入 DeepSeek Harness 的命令行工具
 
 用法：
-  dsh-wechat login [--state-dir <目录>] [--route-tag <标签>] [--base-url <地址>] [--page] [--port N]
-      申请登录二维码；默认在终端渲染。加 --page 时启动本机扫码页并打印地址（请自行在浏览器打开）。
+  dsh-wechat login [--state-dir <目录>] [--route-tag <标签>] [--base-url <地址>]
+      申请登录二维码并在终端渲染（GUI 里的二维码由设置页卡片负责）。
 
   dsh-wechat status [--state-dir <目录>]
       查看绑定状态、长轮询游标、会话映射与收发统计。
@@ -85,23 +84,7 @@ async function commandLogin(flags) {
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
 
-  // `--page` serves the same scan page the plugin uses, and opens a browser.
-  const page =
-    flags.page === true
-      ? new LoginPage({
-          logger,
-          port: flags.port ?? config.loginPagePort,
-          urlFile: resolvePaths(config).loginUrl,
-          onReady: (url) => console.log(`扫码页：${url}`),
-        })
-      : null
   try {
-    if (page) {
-      page.status = () => ({ loggedIn: store.loggedIn, botId: store.credentials?.botId ?? null, stateDir: resolvePaths(config).root })
-      await page.start()
-      // The plugin never starts a program: the address is printed and the operator opens it.
-      console.log(`（请在浏览器里打开上面的地址扫码；--no-open 已不再需要）`)
-    }
     const credentials = await qrLogin({
       client,
       store,
@@ -109,14 +92,8 @@ async function commandLogin(flags) {
       paths: resolvePaths(config),
       signal: controller.signal,
       botType: flags.botType ?? 3,
-      printTerminal: !page,
-      onQr: (qr) => page?.publish({ payload: qr.payload, qrcode: qr.qrcode }),
-      onStatus: (status) => page?.publish({ phase: status === 'wait' ? 'waiting' : status }),
-      shouldRestart: () => {
-        if (!page?.restartRequested) return false
-        page.restartRequested = false
-        return true
-      },
+      // There is no page: the code is printed here, or shown by the settings card in the GUI.
+      printTerminal: true,
     })
     if (!credentials) {
       console.error('登录未完成。')
@@ -128,7 +105,6 @@ async function commandLogin(flags) {
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
-    await page?.stop()
   }
 }
 
@@ -202,7 +178,11 @@ function commandQr(rest) {
 
 async function main(argv) {
   const [command, ...tail] = argv
-  const { flags, rest } = parseFlags(tail)
+  const { flags, rest, unknown } = parseFlags(tail)
+  if (unknown.length > 0) {
+    console.error(`未知参数：${unknown.join(' ')}（用 --help 看支持的参数）`)
+    return 2
+  }
   switch (command) {
     case 'login':
       return commandLogin(flags)

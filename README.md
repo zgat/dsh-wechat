@@ -7,7 +7,7 @@
 ![DSH](https://img.shields.io/badge/DSH-0.2.0--rc.2-blueviolet)
 [![topic: dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-1f6feb)](https://github.com/topics/dsh-plugin)
 
-> **给 Agent 的摘要**：宿主侧 cordis 插件；`dsh plugin --profile <p> add <tgz>` 安装，`node bin/dsh-wechat.mjs login --page` 扫码绑定；绑定后微信即为一个 DSH 会话客户端（命令表见下）。改动前必读「行为契约」；排错看「故障排查」。实现细节在 [docs/design.md](docs/design.md)。
+> **给 Agent 的摘要**：宿主侧 cordis 插件；`dsh plugin --profile <p> add <tgz>` 安装，`node bin/dsh-wechat.mjs login` 扫码绑定（二维码打印在终端；GUI 里用设置页卡片）；绑定后微信即为一个 DSH 会话客户端（命令表见下）。改动前必读「行为契约」；排错看「故障排查」。实现细节在 [docs/design.md](docs/design.md)。
 
 **文档地图**（本页 = 操作入口；实现细节在独立文档里）：
 
@@ -17,7 +17,6 @@
 | [docs/design.md](docs/design.md) | 架构、队列与竞速语义、投递实现、iLink 协议要点、与 DSH 的契约、平台兼容性 |
 | [docs/side-effects.md](docs/side-effects.md) | 对系统的全部副作用（进程/端口/文件/定时器/网络出口）逐项清单 |
 | [docs/profile-verification.md](docs/profile-verification.md) | 一次性 profile 的安装/组合/启动/卸载证据与结果 |
-| [docs/login-page-preview.html](docs/login-page-preview.html) | 扫码页静态预览（二维码是占位内容） |
 
 ## 安装
 
@@ -26,8 +25,8 @@
 dsh plugin --profile desktop add ./dsh-wechat-<版本>.tgz      # 例如 0.1.41
 #    也可以走 GUI：设置 → 插件 → 安装，粘贴该 tgz 路径
 
-# 2) 扫码绑定（生成二维码 + 本机回环扫码页）
-node bin/dsh-wechat.mjs login --page
+# 2) 扫码绑定（二维码打印在终端）
+node bin/dsh-wechat.mjs login
 
 # 3) 在微信里给机器人发任意一句话，会收到上手引导（/help 看全部指令）
 ```
@@ -76,7 +75,7 @@ dsh --profile <profile> --dump-config | grep -A3 dsh-wechat   # 不启动时自�
 | 访问控制 | 默认白名单 + 所有者模型；非所有者不能改权限、不能清凭据 |
 | 错误日志 | 失败记录独立成页（设置页卡片给入口），默认**保留 30 天**、最多 300 条、一分钟内同类错误合并计数；微信里也可 `/errors` 查看最近 10 条 |
 | 多 bot | **一个插件实例可同时绑定多只机器人**：每只各自长轮询、独立会话与命令；设置页点「添加绑定」扫码新增，已有的不受影响 |
-| 设置页卡片 | DSH **设置 → 微信**：每只 bot 的在线状态、扫码时的**二维码（内联 SVG，不依赖图片/CSS）**、添加绑定、刷新、打开扫码页（客户端半边，见下） |
+| 设置页卡片 | DSH **设置 → 微信**：每只 bot 的在线状态、扫码时的**二维码（内联 SVG，不依赖图片/CSS）**、添加绑定、刷新（客户端半边，见下） |
 | 长任务可见 | 「对方正在输入」+ 工具进度行（`progress: brief`）；长任务不静默、也不额外占用发送额度 |
 | 渠道提示词 | 自动告诉模型「这个会话在微信里」：最终回答会自动送达、交付文件用 `wechat_send_file`、长内容先落盘再发——避免它把产物只写到磁盘上（只注入本插件创建的会话） |
 | 断线自愈 | 长轮询退避重试且不丢游标；`ret=-14` 自动清凭据并重新扫码；登录失败 60 秒重试 |
@@ -109,10 +108,10 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 插件带一个**客户端半边**：DSH 设置 → **微信** 里有一张卡片，显示
 
 - 连接状态（已连接 / 等待扫码 / 登录失败）与 bot 名；
-- **未绑定时直接显示二维码**（`<img>` 指向前端路由 `/dsh-wechat/api/qr.svg`），旁边有「刷新二维码」与「打开扫码页」；
+- **未绑定时直接显示二维码**（从 `/dsh-wechat/api/qr` 取 SVG 标记内联绘制），旁边有「刷新二维码」与「添加绑定」；
 - 最近错误（来自 `/status` 同一份状态）。
 
-实现方式与其它微信插件一致：`package.json` 里声明 `dsh.client`（`platform: 'web'`）+ `exports["./client"]`，浏览器 bundle 手写在 `lib/client.js`（只 `require("react")`，注册 `settings.section` slot），宿主侧在 GUI 的 web server 上提供 `/dsh-wechat/api/{status,qr.svg,refresh}`。这几个 API 只监听回环地址、**不带令牌**（与同类插件相同），完整扫码页仍由一次性令牌保护。
+实现方式与其它微信插件一致：`package.json` 里声明 `dsh.client`（`platform: 'web'`）+ `exports["./client"]`，浏览器 bundle 手写在 `lib/client.js`（只 `require("react")`，注册 `settings.section` slot），宿主侧在 GUI 的 web server 上提供 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,errors}` 与错误日志页 `/dsh-wechat/errors`。**没有独立扫码页**：这些路由只监听回环地址、不带令牌，与同类插件一致。
 
 ## 微信里的命令
 
@@ -129,7 +128,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 | `/model [序号\|provider/model]`（`/模型`） | 列出/选择模型（对下一个新会话生效） |
 | `/reasoning [序号\|档位]`（`/思考`、`/effort`） | 列出/选择思考深度（对下一个新会话生效） |
 | `/settings`（`/设置`） | 汇总当前会话的工作区、模型、思考深度 |
-| `/login`（`/登录`） | 重新扫码登录的方法（**不含一次性令牌**；令牌见日志或状态目录的 `login-page.url`） |
+| `/login`（`/登录`） | 重新扫码登录的方法（在 DSH 设置 → 微信 里点「添加绑定」） |
 | `/listen`（`/接收`、`/订阅`、`/follow`） | 开始跟读：其它客户端跑完的回合推到这里（**直接发正文，无前缀**），且该会话的审批/提问两端都能答；未绑定时先建好会话 |
 | `/mute`（`/停止接收`、`/免打扰`、`/unfollow`） | 关闭跟读（不影响你自己回合的回复与审批/提问） |
 | 🔒 `/logout`（`/退出登录`） | 清除本机凭据（会停止收发）；仅所有者可用 |
@@ -173,8 +172,9 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 | `allowedUserIds` | `[]` | 允许的微信用户 ID（也接受逗号分隔字符串） |
 | `ownerUserId` | `null` | 所有者，始终放行；留空时自动采用扫码绑定的微信号 |
 | `autoLogin` | `true` | 无凭据时自动走扫码登录 |
-| `loginPage` | `true` | 是否启动本机扫码页（关闭后二维码只进日志与文件） |
-| `loginPagePort` | `30989` | 扫码页端口；被占用时自动改用系统分配的端口（`0` = 总是系统分配） |
+| `qrInCard` | `true` | 二维码是否画在设置页卡片里（`false` 时只在终端/命令输出里出现；旧名 `loginPage` 仍接受） |
+| `errorLogDays` / `errorLogEntries` | `30` / `300` | 错误日志保留天数与条数上限 |
+| `loginTimeoutSeconds` | `300` | 一次「添加绑定」的最长等待时间，超时自动取消并记入错误日志 |
 | `baseUrl` | `null` | 覆盖 iLink 网关地址（默认 `https://ilinkai.weixin.qq.com`） |
 | `cdnBaseUrl` | `null` | 覆盖媒体 CDN 地址 |
 | `chunkChars` | `1800` | 单条微信消息的最大字符数 |
@@ -235,9 +235,9 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 
 | 能力 | 用在哪里 | 范围与限制 |
 | --- | --- | --- |
-| **文件** | 状态目录 `$DSH_HOME/integrations/dsh-wechat`（凭据/游标/绑定/启动记录，`0600`，目录 `0700`）、媒体目录（默认其下 `media/`，入站附件 `0600`）、扫码页的二维码与 URL 文件 | 不写工作区、不写系统目录（`LaunchAgents`/`crontab`/`systemd` 一律不碰）；写入原子化并带瞬时错误重试 |
-| **网络** | 出站长轮询与发消息（默认 `https://ilinkai.weixin.qq.com`）、附件上传下载（默认 `https://novac2c.cdn.weixin.qq.com/c2c`）、回环扫码页（`127.0.0.1:30989`，可关） | 目标可用配置覆盖但强校验（公网强制 https）；所有请求 `redirect:'error'`；**无遥测、无第三方端点**（由 `test/sideeffects.test.mjs` 出站白名单强制） |
-| **命令/子进程** | **无**：插件不启动任何程序（不打开浏览器、不执行 shell），扫码页只打印地址 | 由 `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不得导入子进程 API |
+| **文件** | 状态目录 `$DSH_HOME/integrations/dsh-wechat`（凭据/游标/绑定/启动记录，`0600`，目录 `0700`）、媒体目录（默认其下 `media/`，入站附件 `0600`）、二维码 SVG 文件 | 不写工作区、不写系统目录（`LaunchAgents`/`crontab`/`systemd` 一律不碰）；写入原子化并带瞬时错误重试 |
+| **网络** | 出站长轮询与发消息（默认 `https://ilinkai.weixin.qq.com`）、附件上传下载（默认 `https://novac2c.cdn.weixin.qq.com/c2c`）、回环接口（`/dsh-wechat/api/*`，随宿主 GUI 端口） | 目标可用配置覆盖但强校验（公网强制 https）；所有请求 `redirect:'error'`；**无遥测、无第三方端点**（由 `test/sideeffects.test.mjs` 出站白名单强制） |
+| **命令/子进程** | **无**：插件不启动任何程序（不打开浏览器、不执行 shell），也不自开监听端口（二维码由设置页卡片绘制） | 由 `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不得导入子进程 API |
 | **凭据** | 读取并保存机器人令牌（`credentials.json`，`0600`；也可由环境变量提供，此时不落盘）；日志与工具进度双重脱敏 | 不读取系统钥匙串、不读取无关环境变量；`/logout` 仅所有者可用，并清除读取失败留下的副本 |
 | **原生制品** | 无 | 零运行时依赖、无原生模块，安装不触发编译 |
 | **受保护的 DSH 行为** | 不修改、不遮蔽、不重复安装任何 `@deepseek-ai/*` 组件 | 只通过 `ctx.get(key)` 使用宿主服务，入口 ID 唯一 |
@@ -258,9 +258,9 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 
 | 现象 | 处理 |
 | --- | --- |
-| 日志只有 `尚未绑定微信机器人` | 没有凭据：`node bin/dsh-wechat.mjs login --page` |
-| 看不到二维码 | ① 日志里的扫码地址；② `cat ~/.dsh/integrations/dsh-wechat/login-page.url`；③ 打开状态目录的 `login-qrcode.svg` |
-| 扫码页打不开 / 端口被占 | 配 `loginPagePort`，或设 `loginPagePort: 0` 让系统分配（日志打印实际地址） |
+| 日志只有 `还没有凭据，跳过接收` | 没有凭据：在设置页点「添加绑定」，或运行 `node bin/dsh-wechat.mjs login` |
+| 看不到二维码 | ① DSH 设置 → 微信 的卡片（点「添加绑定」）；② 终端登录时的二维码；③ 状态目录里的 `login-qrcode.svg` |
+| 卡片里没有二维码 | 确认运行的是含客户端半边的版本，且 profile 里插件为启用状态；`/status` 里应有 `qrUrl` |
 | 反复 `接收消息失败（第 N 次）` | 网络到不了 `ilinkai.weixin.qq.com`：`curl -I https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3` 验证 |
 | `微信会话已过期（ret=-14）` | 插件会清凭据并重新扫码；也可先 `logout` 再 `login` |
 | `no context_token cached` / 主动推送报 `ret=-2 (prepare failed)` | 距该会话最后发言超过约 15–30 分钟：让对方先发一条消息即可恢复 |
@@ -289,7 +289,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 - 发送边界：只发往当前会话/所有者/白名单；**状态目录内的文件（含凭据）拒绝发送**；
 - 日志与工具进度行脱敏：`Bearer …`、`sk-…`/`github_pat_…`/`AKIA…`/`AIza…`、JWT、PEM 私钥块、`token=…` 与中文字段名（`密码`/`令牌`…）；
 - 网络：所有请求禁止跟随重定向；登录返回的 API 基座与 CDN 地址强校验（公网强制 https）；
-- 扫码页只监听 `127.0.0.1` 且带一次性令牌；该令牌不会进入聊天与出站记录。
+- 卡片接口只监听宿主 GUI 的回环端口，不带令牌（与同类插件一致）；二维码只在设置页卡片与终端出现。
 
 完整清单见 [docs/side-effects.md](docs/side-effects.md)。
 

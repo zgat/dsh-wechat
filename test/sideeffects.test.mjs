@@ -38,6 +38,68 @@ async function toolingSources() {
   return sources('scripts')
 }
 
+
+/**
+ * Remove comments without a regex.
+ *
+ * The regex this replaced treated the `/*` inside a comment (`@deepseek-ai/*`) as the start
+ * of a new one and silently deleted half of the file — every assertion then ran against a
+ * shortened source. This walks the text instead, keeping strings intact.
+ * @param {string} code - source text.
+ * @returns {string} the same text without comments.
+ */
+function stripComments(code) {
+  let out = ''
+  /** @type {'code'|'line'|'block'|'single'|'double'|'template'} */
+  let state = 'code'
+  for (let index = 0; index < code.length; index += 1) {
+    const char = code[index]
+    const next = code[index + 1]
+    if (state === 'code') {
+      if (char === '/' && next === '/') {
+        state = 'line'
+        index += 1
+        continue
+      }
+      if (char === '/' && next === '*') {
+        state = 'block'
+        index += 1
+        continue
+      }
+      if (char === "'") state = 'single'
+      else if (char === '"') state = 'double'
+      else if (char === '`') state = 'template'
+      out += char
+      continue
+    }
+    if (state === 'line') {
+      if (char === '\n') {
+        state = 'code'
+        out += char
+      }
+      continue
+    }
+    if (state === 'block') {
+      if (char === '*' && next === '/') {
+        state = 'code'
+        index += 1
+      }
+      continue
+    }
+    // Inside a string: copy verbatim, honouring escapes and the closing quote.
+    out += char
+    if (char === '\\') {
+      out += next ?? ''
+      index += 1
+      continue
+    }
+    if ((state === 'single' && char === "'") || (state === 'double' && char === '"') || (state === 'template' && char === '`')) {
+      state = 'code'
+    }
+  }
+  return out
+}
+
 async function sources(directory = '.') {
   const files = []
   const entries = await readdir(path.join(root, directory), { withFileTypes: true })
@@ -50,11 +112,7 @@ async function sources(directory = '.') {
     }
     if (!/\.(mjs|js)$/.test(entry.name)) continue
     const raw = await readFile(path.join(root, relative), 'utf8')
-    files.push({
-      file: relative,
-      raw,
-      code: raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''),
-    })
+    files.push({ file: relative, raw, code: stripComments(raw) })
   }
   return files
 }
@@ -96,18 +154,17 @@ test('no OS-automation, autostart, or clipboard integration exists', async () =>
   assert.equal(/osascript|pbcopy|pbpaste|crontab|systemctl/i.test(tooling), false, 'tooling stays out of other OS automation')
 })
 
-test('the only listening socket is the loopback scan page', async () => {
+test('the plugin opens no listening socket of its own', async () => {
   const files = await runtimeSources()
-  const servers = files.filter((entry) => /createServer\(/.test(entry.code))
-  assert.deepEqual(servers.map((entry) => entry.file), ['lib/loginpage.js'])
-  const page = servers[0].code
-  assert.match(page, /listen\(port, '127\.0\.0\.1'/, 'the page must bind loopback explicitly')
+  // The scan page used to be a loopback HTTP server of our own. It is gone: the code is drawn
+  // by the settings card, which is served by the host's web server.
   for (const entry of files) {
+    assert.equal(/createServer\(/.test(entry.code), false, `${entry.file} opens a server of its own`)
     assert.equal(/0\.0\.0\.0/.test(entry.code), false, `${entry.file} exposes a wildcard address`)
   }
-  // The GUI integration reuses the host server instead of opening another one.
+  // The only HTTP surface is the host web server the card talks to.
   const index = files.find((entry) => entry.file === 'lib/index.js').code
-  assert.match(index, /webServer\.register\(/, 'the GUI route must reuse the host web server')
+  assert.match(index, /webServer\.register\(/, 'the card API must reuse the host web server')
 })
 
 test('outbound hosts are only the configured WeChat gateway and loopback', async () => {

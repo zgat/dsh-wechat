@@ -103,10 +103,9 @@ test('the card maps every host status onto a label and a tone', async () => {
   assert.equal(adding.canAdd, false, 'one scan at a time')
 
   // Bound but disconnected: not green, and the user can still add or re-open the page.
-  const stale = describe({ bots: [{ botId: 'a@im.bot', connected: false }], pageUrl: '/dsh-wechat/?t=tok' })
+  const stale = describe({ bots: [{ botId: 'a@im.bot', connected: false }] })
   assert.equal(stale.tone, 'wait')
   assert.equal(stale.label, '已绑定（连接中断）')
-  assert.equal(stale.pageUrl, '/dsh-wechat/?t=tok')
   assert.equal(stale.canAdd, true)
 
   // Failures are a pointer now: the message itself lives on the log page.
@@ -139,7 +138,6 @@ test('the rendered card lists every bot and offers «添加绑定»', async () =
       adding: false,
       hasQr: false,
       qrUrl: null,
-      pageUrl: '/dsh-wechat/?t=tok',
       version: '0.2.2',
       errorsUrl: '/dsh-wechat/errors?t=tok',
       errorCount: 2,

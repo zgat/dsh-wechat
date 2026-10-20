@@ -236,10 +236,10 @@ test('a disabled row never starts the channel', async () => {
   }
 })
 
-test('an unbound plugin serves the scan page and completes login from it', async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-loginpage-'))
+test('an unbound plugin starts a login whose code only the settings card sees', async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-cardless-'))
   const gateway = await startGateway()
-  const registeredTools = []
+  const routes = []
 
   // No DSH_WECHAT_* variables: the plugin must start its own login flow.
   delete process.env.DSH_WECHAT_BOT_TOKEN
@@ -251,20 +251,26 @@ test('an unbound plugin serves the scan page and completes login from it', async
   const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
   ctx.provide('agents', harness.registry)
   ctx.provide('sessions', { list: () => [] })
-  ctx.provide('tools', {
-    register(definition) {
-      registeredTools.push(definition)
+  ctx.provide('tools', { register: () => () => {} })
+  ctx.provide('webServer', {
+    port: 0,
+    register(route) {
+      routes.push(route)
       return () => {}
     },
   })
 
-  // The operator-facing URL is printed through the plugin logger; capture it so
-  // the test can act like the person who opens that link.
-  const logged = []
-  const realLog = console.log
-  console.log = (...args) => {
-    logged.push(args.map(String).join(' '))
-  }
+  const call = async (target, options = {}) =>
+    new Promise((resolve) => {
+      const response = {
+        statusCode: null,
+        headers: null,
+        body: '',
+        writeHead(status, headers) { this.statusCode = status; this.headers = headers },
+        end(body) { this.body = body ?? ''; resolve(this) },
+      }
+      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+    })
 
   let fiber
   try {
@@ -273,32 +279,29 @@ test('an unbound plugin serves the scan page and completes login from it', async
       baseUrl: gateway.baseUrl,
       cdnBaseUrl: gateway.baseUrl,
       autoLogin: true,
-      loginPage: true,
-      loginPagePort: 0,
-      openLoginPage: false,
       logLevel: 'info',
     })
 
-    const url = await waitFor(
-      () => logged.map((line) => /http:\/\/127\.0\.0\.1:\d+\/t\/[0-9a-f]+\//.exec(line)?.[0]).find(Boolean),
-      { timeoutMs: 8_000, label: 'login page url in the log' },
-    )
-    // The page URL appears when the page starts, which is one round trip before the
-    // gateway is asked for a code: wait for it instead of racing it.
-    await waitFor(() => gateway.state.qrIssued >= 1, { timeoutMs: 8_000, label: 'qr issued by the gateway' })
+    await waitFor(() => routes.length === 1 && gateway.state.qrIssued >= 1, {
+      timeoutMs: 8_000,
+      label: 'route + qr issued',
+    })
 
-    // The page shows the scan code and the waiting phase.
+    // There is no page at all: the card is the only place the code is drawn.
     const state = await waitFor(
       async () => {
-        const response = await fetch(`${url}state.json`)
-        return response.ok ? response.json() : false
+        const probe = await call('/dsh-wechat/api/status')
+        if (probe.statusCode !== 200) return null
+        const body = JSON.parse(probe.body)
+        return body.hasQr ? body : null
       },
-      { timeoutMs: 8_000, label: 'login page state' },
+      { timeoutMs: 8_000, label: 'card reports a waiting code' },
     )
     assert.equal(state.phase, 'waiting')
-    assert.equal(state.hasQr, true)
-    const html = await (await fetch(url)).text()
-    assert.ok(html.includes('<svg'), 'the page must embed the scan code')
+    const payload = JSON.parse((await call('/dsh-wechat/api/qr')).body)
+    assert.match(payload.svg, /^<svg xmlns/, 'the card receives drawable markup')
+    const page = await call('/dsh-wechat/')
+    assert.equal(page.statusCode, 404, 'the old scan page is gone')
 
     // The person scans and confirms on the phone.
     gateway.state.qrPhase = 'confirmed'
@@ -308,10 +311,10 @@ test('an unbound plugin serves the scan page and completes login from it', async
     // The channel then authenticates and keeps polling with the new token.
     await waitFor(
       async () => {
-        const confirmed = await (await fetch(`${url}state.json`)).json()
-        return confirmed.phase === 'confirmed' && confirmed.botId === 'bot-qr@im.bot'
+        const confirmed = JSON.parse((await call('/dsh-wechat/api/status')).body)
+        return confirmed.phase === 'confirmed' && confirmed.bots.some((bot) => bot.botId === 'bot-qr@im.bot')
       },
-      { timeoutMs: 10_000, label: 'page reflects the login' },
+      { timeoutMs: 10_000, label: 'card reflects the login' },
     )
     const pollsBefore = gateway.state.polls
     gateway.push({
@@ -329,18 +332,16 @@ test('an unbound plugin serves the scan page and completes login from it', async
       label: 'traffic after login',
     })
   } finally {
-    console.log = realLog
     try {
       await fiber?.dispose?.()
     } catch {
       // Assertions above own the failures.
     }
     await gateway.close()
-    await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }
 })
 
-test('the scan page is also served from the harness web server when one exists', async () => {
+test('the card API is served from the harness web server when one exists', async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-webserver-'))
   const gateway = await startGateway()
   const routes = []
@@ -353,6 +354,7 @@ test('the scan page is also served from the harness web server when one exists',
   const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
   ctx.provide('agents', harness.registry)
   ctx.provide('sessions', { list: () => [] })
+  ctx.provide('tools', { register: () => () => {} })
   ctx.provide('webServer', {
     port: 19387,
     register(route) {
@@ -364,11 +366,24 @@ test('the scan page is also served from the harness web server when one exists',
     },
   })
 
-  const logged = []
-  const realLog = console.log
-  console.log = (...args) => {
-    logged.push(args.map(String).join(' '))
-  }
+  /** Drive the plugin's own route the way the settings card does. */
+  const call = async (target, options = {}) =>
+    new Promise((resolve) => {
+      const response = {
+        statusCode: null,
+        headers: null,
+        body: '',
+        writeHead(status, headers) {
+          this.statusCode = status
+          this.headers = headers
+        },
+        end(body) {
+          this.body = body ?? ''
+          resolve(this)
+        },
+      }
+      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+    })
 
   let fiber
   try {
@@ -376,119 +391,53 @@ test('the scan page is also served from the harness web server when one exists',
       stateDir,
       baseUrl: gateway.baseUrl,
       cdnBaseUrl: gateway.baseUrl,
-      loginPage: true,
-      loginPagePort: 0,
-      openLoginPage: false,
-      logLevel: 'info',
+      autoLogin: true,
+      logLevel: 'silent',
     })
 
     await waitFor(() => routes.length === 1, { timeoutMs: 8_000, label: 'route registration' })
     assert.equal(routes[0].kind, 'prefix')
     assert.equal(routes[0].path, '/dsh-wechat')
 
-    // The operator-facing URL points at the GUI origin, not the fallback port.
-    const url = await waitFor(
-      () => logged.map((line) => /http:\/\/127\.0\.0\.1:19387\/dsh-wechat\/\?t=[0-9a-f]+/.exec(line)?.[0]).find(Boolean),
-      { timeoutMs: 8_000, label: 'gui-origin url in the log' },
-    )
-    const token = /t=([0-9a-f]+)/.exec(url)[1]
-
-    // The route enforces the same one-time token as the standalone page.
-    const call = async (target, options = {}) =>
-      new Promise((resolve) => {
-        const response = {
-          statusCode: null,
-          headers: null,
-          body: '',
-          writeHead(status, headers) {
-            this.statusCode = status
-            this.headers = headers
-          },
-          end(body) {
-            this.body = body ?? ''
-            resolve(this)
-          },
-        }
-        routes[0].handler({ url: target, method: options?.method ?? 'GET' }, response)
-      })
-
-    const denied = await call('/dsh-wechat/')
-    assert.equal(denied.statusCode, 403)
-
-    // The page learns the QR one gateway round trip *after* the URL is logged (the
-    // channel publishes it from its login flow), so poll the state route instead of
-    // racing the publish with an immediate assertion.
-    const state = await waitFor(
+    // The card polls status, draws the code from `/api/qr`, and links to the log page.
+    const status = await waitFor(
       async () => {
-        const probe = await call(`/dsh-wechat/state.json?t=${token}`)
+        const probe = await call('/dsh-wechat/api/status')
         if (probe.statusCode !== 200) return null
         const body = JSON.parse(probe.body)
         return body.hasQr ? body : null
       },
-      { timeoutMs: 8_000, label: 'page received the QR' },
+      { timeoutMs: 8_000, label: 'status with a waiting code' },
     )
-    assert.equal(state.hasQr, true)
+    assert.equal(status.errorsUrl, '/dsh-wechat/errors')
+    assert.equal(typeof status.errorCount, 'number')
+    assert.equal(status.pageUrl, undefined, 'there is no page to link to any more')
 
-    const page = await call(`/dsh-wechat/?t=${token}`)
-    assert.equal(page.statusCode, 200)
-    assert.match(page.headers['Content-Type'], /text\/html/)
-    assert.ok(page.body.includes('<svg'), 'the GUI route serves the scan code')
-
-    // The GUI settings card reads a localhost-trust API (no token, like the other WeChat
-    // plugins): it only reports status and the code that is already on screen.
-    const status = await call('/dsh-wechat/api/status')
-    assert.equal(status.statusCode, 200)
-    assert.match(status.headers['Content-Type'], /application\/json/)
-    const statusBody = JSON.parse(status.body)
-    assert.equal(statusBody.hasQr, true, 'the card is told a code is waiting')
-    assert.match(statusBody.qrUrl, /^\/dsh-wechat\/api\/qr\.svg\?v=/)
-    assert.ok(statusBody.pageUrl.includes('t='), 'the card can open the tokenised page')
-
-    // The card draws the code itself from this payload: no <img>, no stylesheet.
-    const qrPayload = await call('/dsh-wechat/api/qr')
-    assert.equal(qrPayload.statusCode, 200)
-    const qrBody = JSON.parse(qrPayload.body)
-    assert.equal(qrBody.ok, true)
-    assert.ok(qrBody.version, 'the payload carries a version for cache busting')
-    assert.match(qrBody.svg, /^<svg xmlns/, 'and the markup the card renders')
-
-    const qr = await call('/dsh-wechat/api/qr.svg')
+    const qr = await call('/dsh-wechat/api/qr')
     assert.equal(qr.statusCode, 200)
-    assert.match(qr.headers['Content-Type'], /image\/svg\+xml/)
-    assert.ok(qr.body.startsWith('<svg'), 'the card embeds a real SVG')
+    assert.match(JSON.parse(qr.body).svg, /^<svg xmlns/, 'the card embeds real markup')
 
-    // The card points at the log instead of printing the failure inside itself.
-    assert.ok(statusBody.errorsUrl.endsWith(`/dsh-wechat/errors?t=${token}`))
-    assert.equal(typeof statusBody.errorCount, 'number')
+    const svg = await call('/dsh-wechat/api/qr.svg')
+    assert.equal(svg.statusCode, 200)
+    assert.match(svg.headers['Content-Type'], /image\/svg\+xml/)
+
+    const logPage = await call('/dsh-wechat/errors')
+    assert.equal(logPage.statusCode, 200, 'the log page needs no token')
+    assert.ok(logPage.body.includes('错误日志'))
 
     const errors = await call('/dsh-wechat/api/errors')
-    assert.equal(errors.statusCode, 200)
-    const errorsBody = JSON.parse(errors.body)
-    assert.equal(errorsBody.retentionDays, 30)
-    assert.ok(Array.isArray(errorsBody.entries))
-
-    // The log page keeps the same one-time token as the scan page.
-    const logDenied = await call('/dsh-wechat/errors')
-    assert.equal(logDenied.statusCode, 403)
-    const logPage = await call(`/dsh-wechat/errors?t=${token}`)
-    assert.equal(logPage.statusCode, 200)
-    assert.match(logPage.headers['Content-Type'], /text\/html/)
-    assert.ok(logPage.body.includes('错误日志'))
+    assert.equal(JSON.parse(errors.body).retentionDays, 30)
 
     const wrongMethod = await call('/dsh-wechat/api/status', { method: 'POST' })
     assert.equal(wrongMethod.statusCode, 405)
 
-    const refreshGet = await call('/dsh-wechat/api/refresh')
-    assert.equal(refreshGet.statusCode, 405, 'refreshing is a POST')
-    const refresh = await call('/dsh-wechat/api/refresh', { method: 'POST' })
-    assert.equal(refresh.statusCode, 200)
-    assert.equal(JSON.parse(refresh.body).ok, true)
+    const gone = await call('/dsh-wechat/')
+    assert.equal(gone.statusCode, 404, 'the scan page no longer exists')
 
     await fiber.dispose()
     fiber = null
     assert.equal(routes.length, 0, 'the route is removed with the plugin')
   } finally {
-    console.log = realLog
     try {
       await fiber?.dispose?.()
     } catch {
@@ -512,7 +461,7 @@ test('booting the plugin records which build is running', async () => {
     baseUrl: gateway.baseUrl,
     accessPolicy: 'open',
     typing: false,
-    loginPage: false,
+    qrInCard: false,
     openLoginPage: false,
     autoLogin: false,
     logLevel: 'silent',

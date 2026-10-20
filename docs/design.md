@@ -17,7 +17,7 @@
 ┌──────────────────────────────────────────────────────────────┐
 │ dsh-wechat 插件（运行在 DSH Host 进程内）                     │
 │                                                              │
-│ index.js     生命周期与装配：服务解析、扫码页、桥接、工具注册 │
+│ index.js     生命周期与装配：服务解析、卡片接口、桥接、工具注册 │
 │ channel.js   登录、长轮询、游标持久化、退避与重登             │
 │ bridge.js    微信会话 ↔ DSH 会话、回合队列、投递、跟读        │
 │ approval.js  approval/request、user-questions/request 应答    │
@@ -170,9 +170,9 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 - `apply(ctx)` → `ctx.slots.inject('settings.section', () => ctx.slots.register({ name:'settings.section', id:'dsh-wechat', order:45, label:'微信' }, WechatSection))`；
 - 组件只用 `react.createElement`（不引入 `@deepseek-ai` 运行时包，无构建步骤），每 4 秒轮询宿主接口渲染状态；
-- **二维码内联绘制**：`GET /dsh-wechat/api/qr` 返回 `{ version, svg }`（与扫码页同一渲染器），卡片把这段 SVG 直接插入 DOM —— 不依赖 `<img>` 加载、样式表或主题，这才算“直接显示在插件上”；`/api/qr.svg` 保留给浏览器直接访问；
-- 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr.svg,refresh}`：`status` 返回连接/阶段/`qrUrl`/`pageUrl`/版本/最近错误，`qr.svg` 复用扫码页同一套矩阵渲染，`refresh` 置 `loginPage.restartRequested` 让登录流换一张码；
-- **边界**：这三个 API 不带令牌（回环地址信任），与同类微信插件一致；完整扫码页与 `/state.json` 仍要求一次性令牌。本地进程因此可以读到二维码——等于可以抢绑，这一点写进已知限制。
+- **二维码内联绘制**：`GET /dsh-wechat/api/qr` 返回 `{ version, svg }`（与终端渲染同一套矩阵），卡片把这段 SVG 直接插入 DOM —— 不依赖 `<img>` 加载、样式表或主题，这才算“直接显示在插件上”；`/api/qr.svg` 保留给浏览器直接访问；
+- 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,errors}` 与错误日志页 `/dsh-wechat/errors`（**没有独立扫码页**，也不自开监听端口）：`status` 返回连接/阶段/`qrUrl`/版本/最近错误，`qr` 返回 `{version, svg}` 供卡片内联绘制，`refresh` 置 `qrState.restartRequested` 让登录流换一张码；
+- **边界**：这些接口不带令牌（回环地址信任），与同类微信插件一致；本地进程因此可以读到二维码——等于可以抢绑，已写进已知限制。旧版的一次性令牌随扫码页一起删除了。
 
 ## 错误日志
 
@@ -180,7 +180,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 - **裁剪**：写入时按 `errorLogDays`（默认 30）丢弃过期条目，再按 `errorLogEntries`（默认 300）截断为最新 N 条；
 - **合并**：与上一条内容相同且 60 秒内的，只更新时间并把 `count` 加一（重试阶梯会让同一错误连刷数次）；
-- **页面**：`GET /dsh-wechat/errors?t=<令牌>` 由 `lib/errorspage.js` 服务端渲染（无客户端脚本，所有文本 HTML 转义），令牌与扫码页同源；
+- **页面**：`GET /dsh-wechat/errors` 由 `lib/errorspage.js` 服务端渲染（无客户端脚本，所有文本 HTML 转义），回环地址、不带令牌；
 - **接口**：`GET /dsh-wechat/api/errors`（回环、无令牌）返回 `{ retentionDays, count, entries }`；
 - **卡片**：不再渲染错误正文，只在 `errorCount > 0` 时显示「错误日志（N）」链接（`errorsUrl` 带令牌）；
 - **命令**：`/errors` 打印最近 10 条（仅所有者）。
@@ -200,7 +200,6 @@ $DSH_HOME/integrations/dsh-wechat/
 ├── state.json           0600，游标 / 会话绑定 / 去重表 / context_token / 跟读 / 统计 / 启动记录
 ├── login-qrcode.txt     最近一次登录二维码（终端字符画）
 ├── login-qrcode.svg     同一二维码的矢量图
-├── login-page.url       当前扫码页地址（含一次性令牌）
 └── media/<日期>/…       入站附件解密后的落盘位置
 ```
 
@@ -216,10 +215,10 @@ $DSH_HOME/integrations/dsh-wechat/
 
 - **发送边界**：`wechat_send_text` / `wechat_send_file` 只发往当前会话、所有者或白名单；状态目录内的文件一律拒发。鉴权用 `realpath` 比较，且上传用的是**已校验的那个解析路径**（避免"检查一个路径、读取另一个路径"）。
 - **脱敏**：`redactSecrets`（递归，深度 12）+ `redactText`（显式模板替换）覆盖 `Bearer/Basic`、`*_TOKEN=`/`password:` 等赋值、JSON 形态（`"password": "…"`）、已知令牌前缀（`sk-`、`ghp_`、`github_pat_`、`AKIA`、`AIza`、`xox[baprs]`）、JWT、PEM 私钥**主体**，以及中文字段名（`密码`/`令牌`/`密钥`/`口令`）；值匹配到 JSON 标点即止，避免吞掉行内其它参数。
-- **一次性令牌**：扫码页地址里的 `?t=<hex>` 是回环页与 `/state.json` 的唯一凭证 → `/login` 回复不含令牌（指向日志/文件），出站记录与日志里的 `t=…`、`/t/…/` 也会被替换。
+- **不再有一次性令牌**：扫码页删除后，唯一的 HTTP 面是设置页卡片的回环接口；二维码因此可以被本地进程读到，这与同类插件相同，属已知边界。
 - **网络**：所有请求 `redirect: 'error'`；登录返回的 API 基座与 CDN 地址强校验（非 http(s)、对公网降级到 http 一律拒绝）；下载带字节上限（声明值预检 + 流式累计，边下边判）。
 - **超时与 abort**：请求的守卫覆盖到**响应体读完**（`fetch()` 返回只代表响应头到达；此前清理守卫会让 body 停滞把接收循环挂死）；调用前已 abort 的 signal 不再发出请求。
-- **回环页**：只监听 `127.0.0.1`，一次性令牌用 `timingSafeEqual` 比较，未授权一律 403；插件不启动浏览器，只在日志与 `login-page.url` 里公布地址。
+- **回环接口**：只挂在宿主 GUI 的回环端口上，不带令牌；插件不启动浏览器，也不自开监听端口。
 
 ## iLink 协议要点（实现相关）
 
@@ -253,7 +252,7 @@ $DSH_HOME/integrations/dsh-wechat/
 
 **不声明 `peerDependencies` 是有意为之**：安装闸门只检查 `@deepseek-ai/dsh*` 的 peer 范围，而本插件不 import 它们，就不该被版本范围锁死。
 
-**为什么有时要重启**：宿主对**配置**是热应用的（改 `cordis.patch.yml` 后插件被重新 `apply`，实测 `loginPage: false` 后扫码页端口约 1 秒关闭），但**已加载的模块不会被重新 import**——所以升级 tarball 后必须重启才能跑新代码。`hmr` 行默认 `root: []`（不监听源码），`dsh plugin add <tgz>` 是拷贝、`add <目录>`/`link:` 才指向源码目录（HMR 用 `realpathSync()` 匹配）。
+**为什么有时要重启**：宿主对**配置**是热应用的（改 `cordis.patch.yml` 后插件被重新 `apply`，实测 `qrInCard: false` 后接口路由随插件重载而消失），但**已加载的模块不会被重新 import**——所以升级 tarball 后必须重启才能跑新代码。`hmr` 行默认 `root: []`（不监听源码），`dsh plugin add <tgz>` 是拷贝、`add <目录>`/`link:` 才指向源码目录（HMR 用 `realpathSync()` 匹配）。
 
 ## 渠道提示词
 
@@ -270,7 +269,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 251 个用例：单元 + 协议 + 桥接 + 交互时序 + 扫码页 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 243 个用例：单元 + 协议 + 桥接 + 交互时序 + 多 bot + 错误日志 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |
@@ -279,11 +278,11 @@ npm test          # 251 个用例：单元 + 协议 + 桥接 + 交互时序 + �
 | `test/ilink.test.mjs` | 对真实 HTTP 假网关跑完整协议：扫码登录、长轮询游标、请求头与信封、`sendmessage` 结构、输入状态、AES-128-ECB 上传/下载两种密钥编码、`ret=-14`、HTTP 与非 JSON 错误映射、响应体停滞超时、已 abort 的 signal 不发请求、解密失败落盘为 `<名称>.enc` |
 | `test/bridge.test.mjs` | 消息 → 会话 → 回合 → 回复全链路、渠道提示词注册：会话复用/续聊、去重、回声丢弃、白名单、分段与截断、`aborted/error` 语义、工具进度、命令、`/new` `/stop`、输入状态、附件落盘、引用消息、审批与提问、主动发送、文件回传、限流二次补发、跟读（含去前缀）、超时与复活、回合归属 |
 | `test/interactions.test.mjs` | 交互时序（毫秒级超时）：微信作答不触碰 `request.signal`、卡片过期后交给另一端而不挂起、发送失败仍能结算、自动关框的先后顺序、`closeRemoteDialogAfterAnswer: false` |
-| `test/plugin.test.mjs` | 用真实 `@deepseek-ai/cordis` 启动插件，接真实 HTTP 假网关：监听到达、工具注册/注销、环境变量凭据、卸载后停止轮询；并跑通「无凭据 → 扫码页 → 二维码 → 确认 → 写凭据 → 收发」 |
+| `test/plugin.test.mjs` | 用真实 `@deepseek-ai/cordis` 启动插件，接真实 HTTP 假网关：监听到达、工具注册/注销、环境变量凭据、卸载后停止轮询；并跑通「无凭据 → 卡片接口出码 → 确认 → 写凭据 → 收发」 |
 | `test/sideeffects.test.mjs` | 副作用预算（**递归扫描、运行时与工具链分域**）：子进程只有一处且先校验、禁止 osascript/开机项/剪贴板/`process.exit`、唯一监听 Socket 绑回环、出站域名白名单、每个 `setInterval` 必须 `unref`、凭据与附件 0600/0700、写文件目标白名单、工具链只碰文档化的系统路径 |
-| `test/loginpage.test.mjs` | 扫码页：一次性令牌鉴权（403）、二维码内嵌、状态机文案、登录后隐藏二维码、`state.json`、换码按钮、端口占用回退、`stop()` 释放端口 |
+| `test/qrstate.test.mjs` | 二维码状态机：阶段文案、`publish` 合并、登录后隐藏二维码、`qrVersion` 变化、`restartRequested` |
 | `test/unit.test.mjs` | 配置归一化与校验（含 `[]`/`true`/NaN 拒绝）、访问策略、路径解析、状态持久化与去重上限、状态形状净化、脱敏用例、分段边界（含代理对）、命令解析、审批原因可读化、版本自证与重启任务形状 |
-| `test/cli.test.mjs` | 真正 `spawn` CLI 进程：`login`（含 `--page`/`--no-open`/`--state-dir`）、`status`、`logout`、`send`、`qr` 的参数解析与退出码 |
+| `test/cli.test.mjs` | 真正 `spawn` CLI 进程：`login`（终端二维码，`--state-dir`）、`status`、`logout`、`send`、`qr` 的参数解析与退出码；未知参数被拒绝 |
 
 开发依赖只有两个且都不参与运行时：`@deepseek-ai/cordis`（启动测试）、`qrcode`（二维码校验基准）。
 **测试不产生真实副作用**：`openInBrowser` 接受注入的 `spawn`/`platform`，测试注入假实现并断言 argv；非 http(s) 输入在 `spawn` 之前即被拒绝（历史教训：`openInBrowser('')` 会打开当前目录，每个测试都弹访达窗口）。
@@ -305,16 +304,16 @@ npm test          # 251 个用例：单元 + 协议 + 桥接 + 交互时序 + �
 | 维度 | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | 运行状态 | ✅ 已实测（DSH 0.2.0-rc.2 桌面端，微信收发闭环） | ⚠️ 未实测，代码路径已审计 | ⚠️ 未实测，代码路径已审计 |
-| 扫码页监听 | `127.0.0.1` | 同 | 同（回环绑定不触发防火墙弹窗） |
+| 回环接口 | 宿主 GUI 端口（`127.0.0.1`） | 同 | 同（不自开端口，不触发防火墙弹窗） |
 | 凭据/附件权限 | `0600`/`0700` 生效 | 生效 | `mode` 基本无效（Node 只映射只读位）；保护来自 `%USERPROFILE%` 目录 ACL |
 | 状态原子写 | `rename` 覆盖 | 同 | 覆盖可能 `EPERM`/`EBUSY`（杀软/索引器）→ 内置退避重试，失败清理临时文件 |
-| 终端二维码 | ✅ | ✅ 需 UTF-8 终端 | 旧 conhost 可能缺字形 → 用 `login --page` |
+| 终端二维码 | ✅ | ✅ 需 UTF-8 终端 | 旧 conhost 可能缺字形 → 在 DSH 设置 → 微信 的卡片里扫 |
 | 中断信号 | SIGINT/SIGTERM | 同 | 只有 SIGINT（Ctrl+C）有效，CLI 已按此处理 |
 | 路径输入 | `~/proj` | 同 | `~\proj` 也支持；含空格路径可加引号：`/workspace "D:\My Projects\a"` |
 | 附件文件名 | 原名 | 原名 | 保留设备名（`CON`/`NUL`/`COM0`/`COM1`/`LPT0`/`CONIN$`/`CONOUT$`…）加 `_`；结尾的点/空格去掉，`report.tmp.` 这类不当作"已有扩展名" |
 | 依赖 | 零运行时依赖、无需编译 | 同 | 同（无 node-gyp 问题） |
 
-跨平台判断抽成了可测纯函数（`expandHome`/`unquote`/`isInsideDirectory`/`withRetries`），并有测试在 macOS 上直接断言 Windows 语义（大小写不敏感、反斜杠分隔符、路径前缀逃逸）。换平台时先 `npm test`，再 `node bin/dsh-wechat.mjs login --page` 确认回环端口与扫码页可用。
+跨平台判断抽成了可测纯函数（`expandHome`/`unquote`/`isInsideDirectory`/`withRetries`），并有测试在 macOS 上直接断言 Windows 语义（大小写不敏感、反斜杠分隔符、路径前缀逃逸）。换平台时先 `npm test`，再 `node bin/dsh-wechat.mjs login` 确认终端二维码可用。
 
 ## 已知限制
 
