@@ -153,7 +153,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 | 长轮询 | `WechatChannel` 每 bot 一个实例（`botId` 构造参数），各自的 client、cursor、去重窗口 |
 | 投递 | 会话键 → bot → `bridge.#clientFor(bot)`；`contextToken` 按 bot 取，回复不会串号 |
 | 登录 | 由插件编排（`startLogin`），一次一个；`/api/add` 触发，成功后 `startBot(credentials.botId)`，已有通道不受影响。每次尝试有独立 `AbortController` 与 **300 秒**上限（`loginTimeoutSeconds`）：超时/失败都会写入错误日志、把页面置为 `failed`，并释放「添加绑定」（否则卡片永远停在「添加中…」且 `/api/add` 一直 409） |
-| 昵称 | 官方协议不提供显示名（QR 状态只有 `ilink_bot_id`/`ilink_user_id`），所以 `credentials.bots[id].label` 是本地的：`POST /api/rename?bot=&label=` 写入，留空回到 `微信机器人 <id 尾 4 位>`；`saveCredentials` 合并时保留 label，重新扫码不会丢名字 |
+| 昵称 | 官方协议不提供显示名（QR 状态只有 `ilink_bot_id`/`ilink_user_id`），所以 `credentials.bots[id].label` 是本地的：`POST /api/rename?bot=&label=` 写入（卡片内联输入框；**不用 `window.prompt`**——Electron 不实现它），留空回到 `微信机器人 <id 尾 4 位>`；`saveCredentials` 合并时保留 label，重新扫码不会丢名字 |
 | 所有者 | 权限判断用**该会话所属 bot** 的 `ownerUserId`（`checkAccess` 的 per-bot 覆盖、`/status` 与欢迎语的 `isOwner`、`maySendTo` 的允许名单），配置里的 `ownerUserId` 仅作兜底；否则第二只 bot 由别人扫码时会被默认的 allowlist 拒掉 |
 | 兼容 | store 的 `credentials`/`cursor`/`hasSeen`/`contextTokenFor` 在不传 bot 时回落到主 bot；未绑定任何 bot 时回落到 v1 顶层字段（测试与首次登录前状态） |
 
@@ -183,7 +183,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - **合并**：与上一条内容相同且 60 秒内的，只更新时间并把 `count` 加一（重试阶梯会让同一错误连刷数次）；
 - **页面**：`GET /dsh-wechat/errors` 由 `lib/errorspage.js` 服务端渲染（无客户端脚本，所有文本 HTML 转义），回环地址、不带令牌；
 - **接口**：`GET /dsh-wechat/api/errors`（回环、无令牌）返回 `{ retentionDays, count, entries }`；
-- **卡片**：不再渲染错误正文，只在 `errorCount > 0` 时显示「错误日志（N）」链接；每只 bot 有「解绑」按钮（`POST /api/logout?bot=`，宿主先停该 bot 的通道再删凭据，其它 bot 不受影响）；二维码未取到时显示转圈占位，尺寸与二维码一致，避免布局跳动；
+- **卡片**：不再渲染错误正文，只在 `errorCount > 0` 时显示「错误日志（N）」链接；每只 bot 有「解绑」按钮（两步确认，不用 `window.confirm`；`POST /api/logout?bot=`，宿主先停该 bot 的通道再删凭据，其它 bot 不受影响）；二维码未取到时显示转圈占位（**从点击「添加绑定」就开始**，申请码的那 1–2 秒也有反馈；登录进行中轮询加密到 600ms，码一到就出现），尺寸与二维码一致，避免布局跳动；
 - **命令**：`/errors` 打印最近 10 条（仅所有者）。
 
 ## 渲染
@@ -270,7 +270,7 @@ $DSH_HOME/integrations/dsh-wechat/
 ## 测试与证据
 
 ```sh
-npm test          # 247 个用例：单元 + 协议 + 桥接 + 交互时序 + 多 bot + 错误日志 + 真实 cordis 启动 + CLI + 副作用预算
+npm test          # 249 个用例：单元 + 协议 + 桥接 + 交互时序 + 多 bot + 错误日志 + 真实 cordis 启动 + CLI + 副作用预算
 ```
 
 | 测试文件 | 覆盖内容 |

@@ -240,3 +240,53 @@ test('while the code is being fetched the card spins instead of showing a blank 
   assert.ok(classes.includes('dw_spin'), 'it sits in a box the size of the code, so nothing jumps when it arrives')
   assert.ok(texts.includes('正在获取二维码…'), 'and it says what is happening')
 })
+
+test('the card never asks the browser for input (Electron has no window.prompt)', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // `window.prompt` throws in Electron, which is exactly how the rename button "did nothing".
+  assert.equal(/window\.prompt\(/.test(source), false, 'no text dialog: the card renders its own input')
+  assert.equal(/window\.confirm\(/.test(source), false, 'no confirmation dialog either: unbinding is two clicks')
+})
+
+test('clicking 添加绑定 spins while the gateway is still minting the code', async () => {
+  const { loaded } = await loadClientModule()
+  // Frame right after the click: a login is in flight, no code has arrived yet.
+  let hooks = 0
+  const react = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: (initial) => [hooks++ === 0 ? {
+      bots: [{ botId: 'a@im.bot', label: '接待号', connected: true }],
+      adding: true,
+      hasQr: false,
+      qrUrl: null,
+      errorsUrl: null,
+      errorCount: 0,
+    } : initial, () => {}],
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+  }
+
+  let section = null
+  loaded.factory(() => react).apply({
+    slots: { inject: (name, factory) => factory(), register: (meta, component) => { section = component } },
+  })
+  const tree = section()
+
+  const classes = []
+  const texts = []
+  const visit = (node) => {
+    if (node === null || node === undefined || typeof node === 'boolean') return
+    if (typeof node === 'string' || typeof node === 'number') {
+      texts.push(String(node))
+      return
+    }
+    if (Array.isArray(node)) return node.forEach(visit)
+    if (node.props?.className) classes.push(String(node.props.className))
+    for (const child of node.children ?? []) visit(child)
+  }
+  visit(tree)
+
+  assert.ok(classes.includes('dw_spinner'), 'the spinner shows before the code exists')
+  assert.ok(texts.includes('正在申请二维码…'), 'and says it is applying for one')
+})
