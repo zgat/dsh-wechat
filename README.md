@@ -245,15 +245,15 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 
 **外部服务**：微信 iLink 网关（必需）、媒体 CDN（仅收发附件时）。二者非本仓库所有，可用性取决于腾讯侧。
 
-**权限等级自评：`high`**（触及凭据、任意网络、会话持久状态与子进程）→ 不满足 STORE 的自动低风险通道，预期 `user-reviewed` / `blocked`，由使用者逐次审阅安装。
+**权限等级自评：`high`**（触及凭据、网络与持久状态；**不含子进程**，也不自开监听端口）→ 不满足 STORE 的自动低风险通道，预期 `user-reviewed` / `blocked`，由使用者逐次审阅安装。
 
 **失败边界**：网络失败退避重试且不丢游标；`ret=-14` 自动清凭据重登；分段发送失败只丢那一段并明确告知（先退避重试，再整轮补发）；`state.json` 损坏或读不出时改名留档、从空状态启动；插件异常不阻断 DSH——停用或卸载即恢复原状（明细见 [docs/side-effects.md](docs/side-effects.md)）。
 
-**一次性 Profile 证据**：安装 / 组合 / 启动 / 卸载的可复现验证记录见 [docs/profile-verification.md](docs/profile-verification.md)（临时 `DSH_HOME` + 系统分配端口，不碰真实 profile）。
+**一次性 Profile 证据**：安装 / 组合 / 卸载的可复现验证记录见 [docs/profile-verification.md](docs/profile-verification.md)（临时 `DSH_HOME`，不碰真实 profile；脚本明确 `booted: false`，真实启动验收需另跑一台 DSH）。
 
-**兼容性**：DSH `0.2.0-rc.2`（端到端实测；`0.2.0-rc.1`、`0.2.1-alpha.1` 未验证）、Node ≥ 20、profile `desktop` 实测（其它 profile 只要提供 `agents`/`sessions` 服务即可运行）、macOS 实测 / Linux 与 Windows 路径已审计。
+**兼容性**：DSH `0.2.0-rc.2` 与 `0.2.1-rc.2`（后者：一次性 profile 的安装/组合/卸载实测 + 插件在该版本上真机运行）、Node ≥ 20、profile `desktop` 实测（其它 profile 只要提供 `agents`/`sessions` 服务即可运行）、macOS 实测 / Linux 与 Windows 路径已审计（`0.2.0-rc.1`、`0.2.1-alpha.1` 未验证）。
 
-**DSH STORE 状态**（2026-10-12 复检）：条目已同步到本仓库提交并确认 **DSH 兼容声明生效**（`0.2.0-rc.2: compatible`）；状态仍为 `blocked`，剩余原因**只有五类权限信号**（files / network / commands / credentials / nativeOrExecutableArtifacts）——即上表所述固有能力，因此请求按 `user-reviewed` 如实呈现（见 [DSH-Store#1321](https://github.com/AI-Scarlett/DSH-Store/issues/1321)）。
+**DSH STORE 状态**（2026-10-20 复检）：目录条目仍停在 `0.2.8`，其 `statusReason` 是**更早 commit 的陈旧结论**（含 `commands` 与 `nativeOrExecutableArtifacts`）。对本仓库当前 commit 用商店自己的分析器复算，`reasons: []`、32 个包内条目全部 `100644`、`commands: false`、`nativeOrExecutableArtifacts: false`，只剩 **files / network / credentials** 三类可人工审阅豁免的信号；商店的官方预检脚本对该 commit 返回 **`status: passed`**（安全扫描 27/27 文件、0 发现）。状态仍为 `blocked` 的原因是**尚无固定来源审阅记录**（`registry/admission-reviews.json` 中作者不能自审），已在 [DSH-Store#1321](https://github.com/AI-Scarlett/DSH-Store/issues/1321) 提交证据并请求审阅。
 
 ## 故障排查
 
@@ -296,7 +296,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 
 ## 平台支持
 
-macOS 已实测（DSH 0.2.0-rc.2 桌面端，微信收发闭环）；Linux / Windows 代码路径已审计但**未实测**。零运行时依赖、无原生模块、无需编译。平台细节（权限位差异、Windows 保留设备名与结尾点、原子写的退避重试、终端二维码字形）见 [docs/design.md](docs/design.md#平台兼容性)。
+macOS 已实测（DSH 0.2.0-rc.2 与 0.2.1-rc.2 桌面端，微信收发闭环）；Linux / Windows 代码路径已审计但**未实测**。零运行时依赖、无原生模块、无需编译。平台细节（权限位差异、Windows 保留设备名与结尾点、原子写的退避重试、终端二维码字形）见 [docs/design.md](docs/design.md#平台兼容性)。
 
 ## 合规提醒
 

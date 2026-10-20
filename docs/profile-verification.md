@@ -13,7 +13,7 @@ bash scripts/verify-profile-boot.sh          # 启动（真实 host，OS 分配�
 | 脚本 | 覆盖 | 隔离手段 |
 | --- | --- | --- |
 | `verify-profile-install.sh` | 基线 `--dump-config` → `dsh plugin add` → 组合出现插件行 → 契约检查（无生命周期脚本、无运行时依赖）→ `dsh plugin remove` → 回到基线 | 临时 `DSH_HOME`；不绑定端口 |
-| `verify-profile-boot.sh` | 同上安装后**真的启动 host**：`--port 0`（系统分配端口）+ `--no-open`，探活宿主自身 URL、验证插件路由（无令牌 403、带令牌 200 + HTML），然后停宿主、卸载、核对组合回基线 | 临时 `DSH_HOME`；`autoLogin: false` 的 quiet overlay（不登录、不联网）；端口由内核分配，不与正在运行的 DSH 冲突 |
+| `verify-profile-boot.sh` | 同上安装后**真的启动 host**：`--port 0`（系统分配端口）+ `--no-open`，探活宿主自身 URL（303 → `/?token=…`）、验证卡片接口 `/dsh-wechat/api/status` 返回 200 且含 `bots`、并确认已删除的扫码页 `/dsh-wechat/` 返回 404，然后停宿主、卸载、核对组合回基线 | 临时 `DSH_HOME`；`autoLogin: false` 的 quiet overlay（不登录、不联网）；端口由内核分配，不与正在运行的 DSH 冲突 |
 
 **profile 说明（如实标注）**：证据在临时 `DSH_HOME` 的 **`web` profile** 上取得——`desktop` profile 由 DSH 桌面端托管（`dsh plugin` 会转发给 App 的 Electron 二进制执行），无法在无人值守下反复装卸。manifest 声明的 `profiles: ['desktop']` 来自作者的本机日常运行（本插件就在 `~/.dsh/profiles/desktop` 里长期工作），而不是这两个脚本。
 
@@ -67,3 +67,5 @@ bash scripts/verify-multibot.sh
 ```
 
 它会打印运行版本、`state.json` 的 schema 与每只 bot 的游标/去重/令牌/在线状态、会话键是否已按 bot 命名空间重写、v1 顶层字段是否清空、迁移备份文件名，以及 `/dsh-wechat/api/status` 现在返回的是 `bots` 列表还是旧的单 bot 形状（后者说明跑的还是旧版本）。
+
+最近一次实测（DSH 0.2.1-rc.2）：`{"status":"passed","install":true,"boot":true,"hostHttp":303,"cardApi":200,"scanPage":404,"uninstall":true,"disposableProfile":true}`。

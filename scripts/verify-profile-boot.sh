@@ -96,31 +96,24 @@ case "$ROOT_STATUS" in
 esac
 
 step "3/4 the plugin mounted in that host"
-# The plugin's route is token-guarded, so a missing token must be a 403: only the
-# plugin can answer that on this origin.
-PLUGIN_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/dsh-wechat/" || true)"
-if [ "$PLUGIN_STATUS" != "403" ]; then
-  echo "expected 403 from the plugin route (token missing), got $PLUGIN_STATUS" >&2
+# The plugin has no page of its own any more (the scan page was deleted in 0.3.0): it
+# contributes the settings-card API only. Two probes prove it is live inside that host:
+# the card API answers JSON, and the old page path is gone (404).
+API_BODY="$ROOT/api.json"
+API_STATUS="$(curl -s -o "$API_BODY" -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/dsh-wechat/api/status" || true)"
+if [ "$API_STATUS" != "200" ] || ! grep -q '"bots"' "$API_BODY"; then
+  echo "expected 200 JSON with a bots list from /dsh-wechat/api/status, got $API_STATUS" >&2
   tail -20 "$HOST_LOG" >&2
   exit 1
 fi
-echo "OK: /dsh-wechat/ answers 403 without a token (route is mounted)"
+echo "OK: /dsh-wechat/api/status answers 200 with a bots list (card API is mounted)"
 
-# …and with the plugin's one-time token the same route serves the scan page, which is
-# the strongest available proof that the plugin is live inside that host.
-PLUGIN_TOKEN="$(grep -oE '微信扫码页已就绪：http://127\.0\.0\.1:[0-9]+/t/[0-9a-f]+/' "$HOST_LOG" | head -1 | grep -oE '/t/[0-9a-f]+/' | tr -d '/t')"
-if [ -n "$PLUGIN_TOKEN" ]; then
-  PAGE_STATUS="$(curl -s -o "$ROOT/page.html" -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/dsh-wechat/?t=$PLUGIN_TOKEN" || true)"
-  if [ "$PAGE_STATUS" != "200" ] || ! grep -q '<!doctype html>' "$ROOT/page.html"; then
-    echo "the plugin route did not serve its page with a valid token (status $PAGE_STATUS)" >&2
-    exit 1
-  fi
-  echo "OK: the plugin serves its scan page through the host origin (200, html)"
-else
-  PLUGIN_STATUS="403"
-  echo "note: no plugin token in the log; the route 403 alone is the evidence" >&2
-  PLUGIN_TOKEN=""
+PAGE_LIKE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/dsh-wechat/" || true)"
+if [ "$PAGE_LIKE_STATUS" != "404" ]; then
+  echo "expected 404 from the removed scan page, got $PAGE_LIKE_STATUS" >&2
+  exit 1
 fi
+echo "OK: /dsh-wechat/ is 404 (the scan page is gone, as documented)"
 
 step "4/4 stop the host and uninstall"
 kill -TERM "$HOST_PID" 2>/dev/null || true
@@ -135,5 +128,5 @@ if grep -q 'dsh-wechat' "$ROOT/after.txt"; then
 fi
 echo "OK: host stopped, plugin removed, composition back to baseline"
 
-printf '\nresult: {"status":"passed","dsh":"%s","install":true,"boot":true,"hostHttp":%s,"pluginRouteNoToken":403,"pluginPageWithToken":%s,"uninstall":true,"disposableProfile":true}\n' \
-  "$("$DSH_BIN" --version 2>/dev/null | head -1)" "$ROOT_STATUS" "${PAGE_STATUS:-not-probed}"
+printf '\nresult: {"status":"passed","dsh":"%s","install":true,"boot":true,"hostHttp":%s,"cardApi":%s,"scanPage":%s,"uninstall":true,"disposableProfile":true}\n' \
+  "$("$DSH_BIN" --version 2>/dev/null | head -1)" "$ROOT_STATUS" "${API_STATUS:-not-probed}" "${PAGE_LIKE_STATUS:-not-probed}"

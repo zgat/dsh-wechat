@@ -1,25 +1,25 @@
 # 系统副作用清单
 
-本插件运行在 DSH Host 进程内、拥有你的用户权限，所以"它会对你机器做什么"是一份契约，而不是注释。本文件逐项列出副作用、约束它与验证它的方式；`test/sideeffects.test.mjs` 把其中的硬约束变成 7 条断言，新增隐式副作用会让测试直接失败。
+本插件运行在 DSH Host 进程内、拥有你的用户权限，所以"它会对你机器做什么"是一份契约，而不是注释。本文件逐项列出副作用、约束它与验证它的方式；`test/sideeffects.test.mjs` 把其中的硬约束变成 8 条断言，新增隐式副作用会让测试直接失败。
 
-审计基准：`dsh-wechat@0.1.10`（2026-09-30）。
+审计基准：`dsh-wechat@0.3.5`（2026-10-20）。
 
 ## 1. 进程
 
 | 项目 | 事实 | 约束 |
 | --- | --- | --- |
-| 子进程 | **无**：插件不启动任何程序（不打开浏览器、不执行 shell）；设置页卡片接口只打印地址 | `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不导入子进程 API |
+| 子进程 | **无**：插件不启动任何程序（不打开浏览器、不执行 shell、不跑 `osascript`） | `test/sideeffects.test.mjs` 断言运行时（`lib/`、`bin/`）不导入子进程 API |
 | 其它进程 | 无 `exec`/`execFile`/`fork`/`osascript`/`defaults`/`plutil` | 断言：运行时不导入任何子进程 API |
 | 进程生命周期 | 不调用 `process.exit()`；不注册信号处理（CLI 除外，且在自己的 `finally` 里 `off`） | 断言：全仓禁止 `process.exit(` |
 
-历史教训：`openInBrowser('')` 曾在 macOS 上让 `/usr/bin/open` 打开**当前目录**，于是每次跑测试都弹出访达窗口。现在不可用输入一次都不会到达启动器。
+历史教训：`openInBrowser('')` 曾在 macOS 上让 `/usr/bin/open` 打开**当前目录**，于是每次跑测试都弹出访达窗口。该函数连同整条子进程链路已在 0.1.56 删除，现在是"插件不启动任何程序"的硬约束（0.3.0 起连自开的监听端口也没有了）。
 
 ## 2. 端口与套接字
 
 | 项目 | 事实 | 约束 |
 | --- | --- | --- |
-| 监听 | **一个** HTTP server：设置页卡片接口，`loginPagePort`（默认 30989） | 显式绑定 `127.0.0.1`，从不 0.0.0.0；端口被占用时回退到系统分配 |
-| GUI 集成 | 复用宿主已有的 web server，注册 `prefix /dsh-wechat` 路由 | 不新开端口；一次性令牌校验（字节级常量时间比较），非 GET/HEAD 返回 405 |
+| 监听 | **零个**：插件不再自开任何端口（旧版的扫码页服务已在 0.3.0 删除） | `test/sideeffects.test.mjs` 断言运行时源码里没有 `createServer(`，也没有 `0.0.0.0` |
+| GUI 集成 | 复用宿主已有的 web server，注册 `prefix /dsh-wechat` 路由（`/api/{status,qr,qr.svg,add,refresh,rename,logout,errors}` 与 `/errors` 页） | 只挂回环端口、不带令牌（与同类插件一致，已写入已知边界）；非预期方法返回 405，未知路径 404 |
 | 出站长连接 | 长轮询 `getupdates` 常驻一条 TCP（约 35 秒一轮，服务端挂起） | 这是协议要求；socket 随 `stop()` 关闭 |
 | 连接池 | 使用全局 `fetch`（undici），默认 keep-alive 复用连接 | 短时残留连接属正常行为，不产生额外监听 |
 
@@ -30,7 +30,6 @@
 ```
 credentials.json   0600   机器人 bearer 凭据
 state.json         0600   游标 / 会话映射 / 已见消息 / context_token / 统计
-login-page.url     0600   设置页卡片接口地址（含一次性令牌）
 login-qrcode.svg   0600   登录二维码
 login-qrcode.txt   0600   同上（字符画）
 state.json.<pid>.<ts>.tmp  写入中间态，随写随改名
@@ -80,7 +79,6 @@ media/<日期>/<时间>-<名>   0600，入站附件解密后的落盘位置
 
 | 副作用 | 关闭方式 |
 | --- | --- |
-| 扫描页监听一个回环端口 | `loginPage: false`（二维码只进日志与文件） |
 | 每回合向微信发送「正在输入」与工具进度 | `typing: false`、`progress: off` |
 | 长轮询持续占用一条出站连接 | 卸载插件或退出 DSH |
 
@@ -96,7 +94,9 @@ media/<日期>/<时间>-<名>   0600，入站附件解密后的落盘位置
 ## 9. 如何验证
 
 ```sh
-node --test test/sideeffects.test.mjs      # 7 条副作用预算断言
-node -e "import('./lib/channel.js').then(m => console.log(m.openInBrowser('')))"   # false，且无弹窗
-lsof -nP -iTCP -sTCP:LISTEN | grep -i node # 只应看到回环上的设置页卡片接口端口
+node --test test/sideeffects.test.mjs   # 8 条副作用预算断言（含"插件不自开监听端口"）
+git ls-files -s | awk '$1=="100755"'    # 空：仓库里没有可执行位
+ls -l bin/dsh-wechat.mjs                # 100644
+curl -s "http://127.0.0.1:<GUI 端口>/dsh-wechat/api/status"   # 卡片接口只在宿主 GUI 端口上
 ```
+

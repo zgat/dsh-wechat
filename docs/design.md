@@ -163,7 +163,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - ②：`POST /dsh-wechat/api/add` → 网关发码 → 确认 → 新 bot 与已有 bot **并存入同一凭据文件**，且原 bot 在整个登录过程中**持续轮询**（无需重启）。
 - ③ `test/multibot.test.mjs`：v1 状态迁移（会话键、游标、令牌、去重窗口)、两 bot 状态隔离、移除一只不影响另一只、重载持久化。
 
-**已知边界**：解绑某只 bot 后它的长轮询要等重启才停（通道是一次性实例）；`stats` 与最近错误是全局统计，不按 bot 分开。真机上"两只同时在线"尚待用第二个微信号验收。
+**已知边界**：从**聊天**里 `/logout` 只删凭据，该 bot 的长轮询会持续到会话过期或重启；从**设置页卡片**解绑会先停掉通道再删凭据，且之后「添加绑定」可原地把它加回来（无需重启）。`stats` 与最近错误是全局统计，不按 bot 分开。真机上"两只同时在线"尚待用第二个微信号验收。
 
 ## 客户端半边（设置页卡片）
 
@@ -281,7 +281,8 @@ npm test          # 249 个用例：单元 + 协议 + 桥接 + 交互时序 + �
 | `test/interactions.test.mjs` | 交互时序（毫秒级超时）：微信作答不触碰 `request.signal`、卡片过期后交给另一端而不挂起、发送失败仍能结算、自动关框的先后顺序、`closeRemoteDialogAfterAnswer: false` |
 | `test/plugin.test.mjs` | 用真实 `@deepseek-ai/cordis` 启动插件，接真实 HTTP 假网关：监听到达、工具注册/注销、环境变量凭据、卸载后停止轮询；并跑通「无凭据 → 卡片接口出码 → 确认 → 写凭据 → 收发」 |
 | `test/sideeffects.test.mjs` | 副作用预算（**递归扫描、运行时与工具链分域**）：子进程只有一处且先校验、禁止 osascript/开机项/剪贴板/`process.exit`、唯一监听 Socket 绑回环、出站域名白名单、每个 `setInterval` 必须 `unref`、凭据与附件 0600/0700、写文件目标白名单、工具链只碰文档化的系统路径 |
-| `test/qrstate.test.mjs` | 二维码状态机：阶段文案、`publish` 合并、登录后隐藏二维码、`qrVersion` 变化、`restartRequested` |
+| `test/clientbundle.test.mjs` | 客户端半边：模块契约（loader 注册、`inject`、slot 元数据）、状态→卡片映射、渲染（两只 bot 的昵称/在线/改名/解绑按钮、申请中的转圈）、"不得用 `window.prompt`/`confirm`" |
+| `test/errorlog.test.mjs` | 错误日志：重复合并、按天裁剪、条数上限、清空、页面转义与空状态 |
 | `test/unit.test.mjs` | 配置归一化与校验（含 `[]`/`true`/NaN 拒绝）、访问策略、路径解析、状态持久化与去重上限、状态形状净化、脱敏用例、分段边界（含代理对）、命令解析、审批原因可读化、版本自证与重启任务形状 |
 | `test/cli.test.mjs` | 真正 `spawn` CLI 进程：`login`（终端二维码，`--state-dir`）、`status`、`logout`、`send`、`qr` 的参数解析与退出码；未知参数被拒绝 |
 
