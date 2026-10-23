@@ -26,7 +26,22 @@ DSH_BIN="${DSH_BIN:-dsh}"
 command -v "$DSH_BIN" >/dev/null || { echo "the dsh CLI is not on PATH (set DSH_BIN)" >&2; exit 2; }
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dsh-wechat-profile-XXXXXX")"
-cleanup() { rm -rf "$ROOT"; }
+EVIDENCE_DIR="${EVIDENCE_DIR:-}"
+cleanup() {
+  # With EVIDENCE_DIR set the caller wants the artifacts kept: copy the composition
+  # baseline, the post-uninstall copy and their diff out before the temp dir goes away.
+  if [ -n "$EVIDENCE_DIR" ]; then
+    mkdir -p "$EVIDENCE_DIR"
+    # before.txt = baseline, after.txt = composed with the plugin, removed.txt = post-uninstall.
+    cp -f "$ROOT/before.txt" "$EVIDENCE_DIR/composition-before.txt" 2>/dev/null || true
+    cp -f "$ROOT/after.txt" "$EVIDENCE_DIR/composition-installed.txt" 2>/dev/null || true
+    cp -f "$ROOT/removed.txt" "$EVIDENCE_DIR/composition-after-uninstall.txt" 2>/dev/null || true
+    # The reviewer's question is baseline vs post-uninstall: that diff must be empty.
+    ( diff -u "$ROOT/before.txt" "$ROOT/removed.txt" > "$EVIDENCE_DIR/composition.diff" 2>&1 || true )
+    echo "EVIDENCE_DIR=$EVIDENCE_DIR" >&2
+  fi
+  rm -rf "$ROOT"
+}
 trap cleanup EXIT
 
 export DSH_HOME="$ROOT/home"
@@ -35,6 +50,15 @@ export npm_config_cache="$ROOT/npm-cache"
 mkdir -p "$DSH_HOME"
 
 step() { printf '\n── %s\n' "$1"; }
+# Reviewer-facing: every command the evidence depends on, redacted, with its status.
+run_step() {
+  local label="$1"; shift
+  printf '\n── %s\n  $ %s\n' "$label" "$*" | tee -a "${EVIDENCE_LOG:-/dev/null}"
+  "$@" 2>&1 | tee -a "${EVIDENCE_LOG:-/dev/null}"
+  local code=${PIPESTATUS[0]}
+  printf '  exit=%s\n' "$code" | tee -a "${EVIDENCE_LOG:-/dev/null}"
+  return "$code"
+}
 
 step "1/4 baseline composition (no plugin)"
 "$DSH_BIN" --profile web --dump-config > "$ROOT/before.txt"
