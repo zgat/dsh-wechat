@@ -819,3 +819,11 @@ test('the last error is labelled as stale when it predates this run', () => {
   const bare = describeLastError({ stats: { lastError: { at: new Date().toISOString(), message: 'weird' } } })
   assert.equal(/💡/.test(bare), false)
 })
+
+test('turnTimeoutSeconds accepts 0 as "do not remind" and rejects negatives', () => {
+  // The reminder is noise for some operators; the turn itself is never interrupted either way.
+  assert.equal(normalizeConfig({ turnTimeoutSeconds: 0 }).turnTimeoutSeconds, 0)
+  assert.equal(normalizeConfig({ turnTimeoutSeconds: 30 }).turnTimeoutSeconds, 30)
+  assert.equal(normalizeConfig({}).turnTimeoutSeconds, 900)
+  assert.throws(() => normalizeConfig({ turnTimeoutSeconds: -1 }), /turnTimeoutSeconds/)
+})

@@ -186,7 +186,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 | `typingKeepaliveSeconds` | `5` | 输入状态保活间隔 |
 | `progress` | `brief` | `off` 只回最终答案；`brief` 加工具进度；`verbose` 再加中间说明 |
 | `showToolProgress` | `true` | `progress != off` 时是否推送 `🔧 tool` 行（关掉只影响通知，不影响工具可用） |
-| `turnTimeoutSeconds` | `900` | 单轮最长等待；超时后发提示（回合继续在后台跑），提示会请用户回一句话或发 `/listen`（见「超时与节奏」） |
+| `turnTimeoutSeconds` | `900` | 超过这个时长发一条**提醒**（回合继续在后台跑，不是中断）；`0` = 不提醒（见「超时与节奏」） |
 | `approvalTimeoutSeconds` | `300` | 审批卡有效期；超时把决策交回另一端 |
 | `questionsTimeoutSeconds` | `600` | 提问卡有效期；超时同上 |
 | `idleDisposeMinutes` | `0` | 安静这么多分钟后释放常驻 Agent（绑定保留，下条消息自动 resume）；`0` = 常驻，可写小数 |
@@ -223,7 +223,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 
 | 项 | 默认 | 行为 |
 | --- | --- | --- |
-| 单轮等待 | 900s（15 分钟） | 超时发提示（回合继续跑）；用户回话即"复活"，答案随后补发 |
+| 单轮提醒 | 900s（15 分钟） | **只发一条提醒**（回合继续跑）；设 `turnTimeoutSeconds: 0` 可完全不提醒；用户回话即"复活"，答案随后补发 |
 | 平台发送额度 | 同一窗口 10 条 | 超出被拒（`ret=-2`）；**用户在微信发任意一句话即可解锁** |
 | 审批卡 | 300s（5 分钟） | 超时只撤微信卡，决策权交回另一端 |
 | 提问卡 | 600s（10 分钟） | 同上 |

@@ -61,7 +61,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
   - `pending.turn === null` 且 `turn !== blockedByTurn` → 采纳为该消息的回合；
   - `turn === blockedByTurn` → 是别的客户端那一轮，不采纳（否则排队消息会"吃掉"别人的 `turn/end`，把别人的答案发到这里）。
 - **turn/end 归属**：先按 `pending.turn === turn` 精确匹配；没有匹配项时才回退到"尚未开始的 pending"，且**不允许**回退命中 `blockedByTurn` 那一轮。
-- **超时**：队列头超过 `turnTimeoutSeconds` → 标记 `abandoned`、停输入状态、发提示（提示里说明"回一句话或 `/listen` 即可继续接收"）。
+- **超时提醒**：队列头超过 `turnTimeoutSeconds` → 标记 `abandoned`、停输入状态、发一条提示（说明"回一句话或 `/listen` 即可继续接收"）。**`0` 关闭**：这时不装定时器，回合照常后台跑完，只是不主动提醒。
 - **复活**：该会话**再次收到消息**时，仍在运行（`turn !== null`）的 abandoned 条目会被清掉标记并重新计时；它的 `turn/end` 到达时正常投递。未再互动的 abandoned 条目在其 `turn/end` 到达时**丢弃**——避免这条迟到的结束事件被算到下一条排队消息头上。
 - **丢弃**：`/new`、`/session` 切换、`/stop`、归档、插件卸载都会清队列，并同时清掉两类定时器（超时、输入保活）与 `#runningTurn`/`#followBuffers` 里的残留。
 
