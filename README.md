@@ -194,6 +194,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 | `model` | `null` | `provider/model` 或 `{ provider, model, reasoningEffort?, maxTokens? }`；留空采用 DSH 默认模型（必须能解析出路由） |
 | `media.enabled` | `true` | 是否收发图片/文件 |
 | `media.dir` | `stateDir/media` | 入站附件落盘目录 |
+| `media.serveInbound` | `true` | 把入站图片挂到卡片的回环路由 `/dsh-wechat/media/<不透明 id>`，并在消息里附 Markdown 图片链接（能不能显示成缩略图取决于 GUI 是否渲染用户消息里的图片；关掉则只给路径） |
 | `media.maxInboundBytes` | `20971520` | 入站媒体上限，超出直接拒绝 |
 | `media.maxOutboundBytes` | `52428800` | 出站文件上限（本地保险）。实测 30 MiB / 33.4 MiB 都能正常送达，该量级**没有**平台大小限制 |
 | `media.uploadTimeoutMs` | `0` | 上传超时预算；`0` = 按体积自动（假设 ≥50KB/s，下限 120 秒、上限 15 分钟）。33MB 约 12.7 分钟；上行慢就调大 |

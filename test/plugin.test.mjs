@@ -434,6 +434,11 @@ test('the card API is served from the harness web server when one exists', async
     const gone = await call('/dsh-wechat/')
     assert.equal(gone.statusCode, 404, 'the scan page no longer exists')
 
+    // Inbound-media route: only opaque ids this process registered are served, so unknown ids
+    // and traversal attempts are indistinguishable 404s.
+    assert.equal((await call('/dsh-wechat/media/deadbeef')).statusCode, 404)
+    assert.equal((await call('/dsh-wechat/media/..%2F..%2Fetc%2Fpasswd')).statusCode, 404)
+
     await fiber.dispose()
     fiber = null
     assert.equal(routes.length, 0, 'the route is removed with the plugin')

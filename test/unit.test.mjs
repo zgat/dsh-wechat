@@ -14,6 +14,8 @@ import { expandHome, isInsideDirectory, unquote } from '../lib/bridge.js'
 import { withRetries } from '../lib/retry.js'
 import { sleep } from '../lib/waits.js'
 import { describeVersion } from '../lib/commands.js'
+import { ITEM_TYPE } from '../lib/ilink/api.js'
+import { describeFilesForPrompt, mediaMime } from '../lib/ilink/media.js'
 import { messageText } from '../lib/harness.js'
 import os from 'node:os'
 import path from 'node:path'
@@ -826,4 +828,29 @@ test('turnTimeoutSeconds accepts 0 as "do not remind" and rejects negatives', ()
   assert.equal(normalizeConfig({ turnTimeoutSeconds: 30 }).turnTimeoutSeconds, 30)
   assert.equal(normalizeConfig({}).turnTimeoutSeconds, 900)
   assert.throws(() => normalizeConfig({ turnTimeoutSeconds: -1 }), /turnTimeoutSeconds/)
+})
+
+test('inbound images gain a loopback link, and only images do', () => {
+  const files = [
+    { type: ITEM_TYPE.IMAGE, name: 'photo.jpg', path: '/state/media/x/photo.jpg', size: 1234 },
+    { type: ITEM_TYPE.FILE, name: 'doc.pdf', path: '/state/media/x/doc.pdf', size: 99 },
+    { type: ITEM_TYPE.IMAGE, name: 'broken.jpg.enc', path: '/state/media/x/broken.jpg.enc', size: 10 },
+  ]
+  const block = describeFilesForPrompt(files, { imageUrl: (file) => `/dsh-wechat/media/${file.name}` })
+  assert.match(block, /!\[photo\.jpg\]\(\/dsh-wechat\/media\/photo\.jpg\)/, 'images render inline')
+  assert.equal(/!\[doc\.pdf\]/.test(block), false, 'documents keep the plain path')
+  assert.match(block, /broken\.jpg\.enc.*解密失败/, 'the decryption warning survives')
+
+  // Without a linker the block is path-only, which is what `media.serveInbound: false` gives.
+  const plain = describeFilesForPrompt(files)
+  assert.equal(plain.includes('!['), false)
+})
+
+test('media MIME types cover the common inbound formats', () => {
+  assert.equal(mediaMime('/x/a.JPG'), 'image/jpeg')
+  assert.equal(mediaMime('/x/a.png'), 'image/png')
+  assert.equal(mediaMime('/x/a.webp'), 'image/webp')
+  assert.equal(mediaMime('/x/a.mp4'), 'video/mp4')
+  assert.equal(mediaMime('/x/a.pdf'), 'application/pdf')
+  assert.equal(mediaMime('/x/a.unknown'), 'application/octet-stream')
 })
