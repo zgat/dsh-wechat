@@ -3318,3 +3318,58 @@ test('a message to the second bot is judged by that bot\'s owner, not the first 
     await env.cleanup()
   }
 })
+
+test('a broken preset service cannot take /workspace down', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        // 0.2.2 changed an input shape and `current(session)` started throwing on an absent
+        // header; a status description must degrade instead of failing the command.
+        // DSH reads `session.header` inside stateOf(); with a stale session id our old code
+        // passed `undefined` straight in, which threw exactly this TypeError.
+        permissionPresets: { current: (session) => {
+          if (!session) throw new TypeError("Cannot read properties of undefined (reading 'header')")
+          return 'default'
+        } },
+        agentPresets: { composedPreset: () => { throw new Error('preset explosion') } },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '你好' }))
+    await waitFor(() => env.harness.agents.length === 1)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace', id: 2 }))
+    const listing = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /项目目录/.test(t)))
+    assert.match(listing, /项目目录/)
+
+    await env.bridge.handleInbound(inboundMessage({ text: '/status', id: 3 }))
+    const status = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /📊 状态/.test(t)))
+    assert.match(status, /📊 状态/)
+    assert.equal(/执行失败/.test(status), false, 'status did not fail')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('/workspace survives a session id the host no longer knows', async () => {
+  const env = await setup({
+    harness: {
+      services: {
+        permissionPresets: { current: (session) => {
+          if (!session) throw new TypeError("Cannot read properties of undefined (reading 'header')")
+          return 'default'
+        } },
+      },
+    },
+  })
+  try {
+    // A binding left behind by an older host: the store has an id, the host has no session.
+    await env.store.setSession('p2p:user@im.wechat', 'session-gone-forever')
+    await env.bridge.handleInbound(inboundMessage({ text: '/workspace', id: 11 }))
+    const listing = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /项目目录/.test(t)))
+    assert.match(listing, /项目目录/)
+  } finally {
+    await env.cleanup()
+  }
+})

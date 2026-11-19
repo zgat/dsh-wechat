@@ -200,6 +200,15 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 **边界**：DSH 的 host API 没有"插件向会话追加附件"的公开接口——GUI 里的图片是客户端上传时自己 encode 的。所以这里能做到的是"给渲染器一个可加载的图片 URL"，能否显示缩略图取决于 GUI 是否渲染用户消息中的图片；模型侧仍只看到路径（可自行用文件工具/视觉工具打开）。
 
+## 陈旧会话与状态描述
+
+`/status`、`/workspace`、工具都通过 `describeConversation()` 取状态。其中权限与预设属于**装饰性元数据**：
+
+- 权限：`permissionPresets.current(session)`，DSH 内部会读 `session.header`；
+- 预设：`agentPresets.composedPreset(agent.ctx)`。
+
+绑定表里可能留着**宿主已经不认识的 session id**（DSH 升级或重启后）。旧代码把 `sessions.get(id)`（此时是 `undefined`）直接传给 `current()`，DSH 内部 `stateOf(undefined)` 抛 `Cannot read properties of undefined (reading 'header')`，于是 `/workspace`、`/status` 整条命令失败。现在两个查询都走 `#safeLookup()`：拿不到会话就返回 `null`，服务抛错也只降级为未知，并在 debug 日志里留 4 行栈；命令错误回执也会附上第一帧 `<at …>` 便于定位。
+
 ## 渲染
 
 - **表格**（`renderTable()`）：`/status` 输出 **Markdown 表格**——微信会渲染它，所以不需要自己画框线，也**不需要按中文双宽补空格**（对齐由渲染器负责）。单元格里的 `|` 转义成 `\|`、换行折成空格，避免破坏表格结构；放不进单元格的长内容（最近错误原文）写在表格下方。
