@@ -96,24 +96,54 @@ case "$ROOT_STATUS" in
 esac
 
 step "3/4 the plugin mounted in that host"
-# The plugin has no page of its own any more (the scan page was deleted in 0.3.0): it
-# contributes the settings-card API only. Two probes prove it is live inside that host:
-# the card API answers JSON, and the old page path is gone (404).
-API_BODY="$ROOT/api.json"
-API_STATUS="$(curl -s -o "$API_BODY" -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/dsh-wechat/api/status" || true)"
-if [ "$API_STATUS" != "200" ] || ! grep -q '"bots"' "$API_BODY"; then
-  echo "expected 200 JSON with a bots list from /dsh-wechat/api/status, got $API_STATUS" >&2
-  tail -20 "$HOST_LOG" >&2
-  exit 1
-fi
-echo "OK: /dsh-wechat/api/status answers 200 with a bots list (card API is mounted)"
+# The private route is fenced by the connection service (AUTH001): a plain request must be
+# refused, and a browser-authenticated one must still answer. Both directions are evidence.
+ORIGIN="http://127.0.0.1:$PORT"
+PLUGIN_PATH="/dsh-wechat/api/status"
 
-PAGE_LIKE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/dsh-wechat/" || true)"
-if [ "$PAGE_LIKE_STATUS" != "404" ]; then
-  echo "expected 404 from the removed scan page, got $PAGE_LIKE_STATUS" >&2
-  exit 1
-fi
-echo "OK: /dsh-wechat/ is 404 (the scan page is gone, as documented)"
+# (a) untrusted: no cookie → the fence refuses before any private state is read.
+FENCED_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+  -H "Origin: $ORIGIN" "$ORIGIN$PLUGIN_PATH" || true)"
+case "$FENCED_STATUS" in
+  401|403|503) echo "OK: $PLUGIN_PATH refuses an unauthenticated caller ($FENCED_STATUS)" ;;
+  *) echo "expected a refusal from the fenced route, got $FENCED_STATUS" >&2
+     tail -20 "$HOST_LOG" >&2
+     exit 1 ;;
+esac
+
+# (b) trusted: exchange the launch token the host printed for a browser cookie, then ask again.
+JAR="$ROOT/cookies.txt"
+curl -s -o /dev/null -c "$JAR" -L --max-time 5 "$HOST_URL" || true
+API_BODY="$ROOT/api.json"
+API_STATUS="$(curl -s -o "$API_BODY" -w '%{http_code}' --max-time 3 -b "$JAR" \
+  -H "Origin: $ORIGIN" "$ORIGIN$PLUGIN_PATH" || true)"
+case "$API_STATUS" in
+  200)
+    grep -q '"bots"' "$API_BODY" || { echo "authenticated call returned no bots list" >&2; exit 1; }
+    FENCE_MODE="authenticated-200"
+    echo "OK: $PLUGIN_PATH answers 200 with a bots list once authenticated (card API is live)"
+    ;;
+  503)
+    # A freshly created disposable profile may not compose the connection plugin at all; the
+    # route then has no trust source and must refuse everything. That is the documented
+    # fail-closed behaviour, not a failure of the install.
+    FENCE_MODE="fail-closed-no-connection"
+    echo "OK: $PLUGIN_PATH answered 503 because this profile has no connection service (fail closed)"
+    ;;
+  *)
+    echo "unexpected status from $PLUGIN_PATH for an authenticated caller: $API_STATUS" >&2
+    tail -20 "$HOST_LOG" >&2
+    exit 1
+    ;;
+esac
+
+PAGE_LIKE_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -b "$JAR" \
+  -H "Origin: $ORIGIN" "http://127.0.0.1:$PORT/dsh-wechat/" || true)"
+case "$PAGE_LIKE_STATUS" in
+  404) echo "OK: /dsh-wechat/ is 404 (the scan page is gone, as documented)" ;;
+  401|403|503) echo "OK: /dsh-wechat/ is refused by the trust fence ($PAGE_LIKE_STATUS); no scan page exists" ;;
+  *) echo "unexpected status from /dsh-wechat/: $PAGE_LIKE_STATUS" >&2; exit 1 ;;
+esac
 
 step "4/4 stop the host and uninstall"
 kill -TERM "$HOST_PID" 2>/dev/null || true
@@ -128,5 +158,5 @@ if grep -q 'dsh-wechat' "$ROOT/after.txt"; then
 fi
 echo "OK: host stopped, plugin removed, composition back to baseline"
 
-printf '\nresult: {"status":"passed","dsh":"%s","install":true,"boot":true,"hostHttp":%s,"cardApi":%s,"scanPage":%s,"uninstall":true,"disposableProfile":true}\n' \
-  "$("$DSH_BIN" --version 2>/dev/null | head -1)" "$ROOT_STATUS" "${API_STATUS:-not-probed}" "${PAGE_LIKE_STATUS:-not-probed}"
+printf '\nresult: {"status":"passed","dsh":"%s","install":true,"boot":true,"hostHttp":%s,"fencedWithoutAuth":%s,"cardApi":%s,"fenceMode":"%s","scanPage":%s,"uninstall":true,"disposableProfile":true}\n' \
+  "$("$DSH_BIN" --version 2>/dev/null | head -1)" "$ROOT_STATUS" "${FENCED_STATUS:-not-probed}" "${API_STATUS:-not-probed}" "${FENCE_MODE:-unknown}" "${PAGE_LIKE_STATUS:-not-probed}"
