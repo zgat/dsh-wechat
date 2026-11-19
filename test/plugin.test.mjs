@@ -252,6 +252,9 @@ test('an unbound plugin starts a login whose code only the settings card sees', 
   ctx.provide('agents', harness.registry)
   ctx.provide('sessions', { list: () => [] })
   ctx.provide('tools', { register: () => () => {} })
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', {
     port: 0,
     register(route) {
@@ -269,7 +272,7 @@ test('an unbound plugin starts a login whose code only the settings card sees', 
         writeHead(status, headers) { this.statusCode = status; this.headers = headers },
         end(body) { this.body = body ?? ''; resolve(this) },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   let fiber
@@ -355,6 +358,9 @@ test('the card API is served from the harness web server when one exists', async
   ctx.provide('agents', harness.registry)
   ctx.provide('sessions', { list: () => [] })
   ctx.provide('tools', { register: () => () => {} })
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', {
     port: 19387,
     register(route) {
@@ -382,7 +388,7 @@ test('the card API is served from the harness web server when one exists', async
           resolve(this)
         },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   let fiber
@@ -494,5 +500,77 @@ test('booting the plugin records which build is running', async () => {
     await fiber.dispose()
     await gateway.close()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the private route refuses untrusted callers before touching state', async () => {
+  /** Boot the plugin over fakes, with a connection service chosen by the case. */
+  async function boot(connectionProvider) {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-wechat-trust-'))
+    const gateway = await startGateway()
+    process.env.DSH_WECHAT_BOT_TOKEN = 'token-trust'
+    process.env.DSH_WECHAT_BASE_URL = gateway.baseUrl
+    process.env.DSH_WECHAT_BOT_ID = 'bot-trust@im.bot'
+    const ctx = new Context().isolate?.() ?? new Context()
+    const harness = createFakeHarness({ reply: 'ok', emitTo: (eventName, ...args) => ctx.emit(eventName, ...args) })
+    ctx.provide('agents', harness.registry)
+    ctx.provide('sessions', { list: () => [], get: () => undefined })
+    ctx.provide('tools', { register: () => () => {} })
+    const routes = []
+    ctx.provide('webServer', { port: 19387, register(route) { routes.push(route); return () => {} } })
+    if (connectionProvider) ctx.provide('connection', connectionProvider)
+    const fiber = ctx.plugin(plugin, { stateDir, accessPolicy: 'open', typing: false, progress: 'off', logLevel: 'silent' })
+    await waitFor(() => routes.length === 1, { timeoutMs: 8_000, label: 'route' })
+    const call = async (target, options = {}) =>
+      new Promise((resolve) => {
+        const response = {
+          statusCode: null, headers: null, body: '',
+          writeHead(status, headers) { this.statusCode = status; this.headers = headers },
+          end(body) { this.body = body ?? ''; resolve(this) },
+        }
+        routes[0].handler({
+          url: target,
+          method: options.method ?? 'GET',
+          headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' },
+        }, response)
+      })
+    return { fiber, call, stateDir, gateway, cleanup: async () => {
+      await fiber?.dispose?.()
+      await gateway.close()
+      delete process.env.DSH_WECHAT_BOT_TOKEN
+      delete process.env.DSH_WECHAT_BASE_URL
+      delete process.env.DSH_WECHAT_BOT_ID
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
+    } }
+  }
+
+  const trusted = { requestRejection: () => undefined }
+  const noService = await boot(undefined)
+  const throwing = await boot({ requestRejection: () => { throw new Error('fence exploded') } })
+  const crossOrigin = await boot({
+    requestRejection: (request) => (request.headers.origin === 'https://evil.example' ? 403 : undefined),
+  })
+  const ok = await boot(trusted)
+  try {
+    // 1) missing service → fail closed
+    assert.equal((await noService.call('/dsh-wechat/api/status')).statusCode, 503)
+    // 2) a throwing check → fail closed
+    assert.equal((await throwing.call('/dsh-wechat/api/status')).statusCode, 403)
+    // 3) cross-site Origin → refused, and the body carries no private state
+    const bad = await crossOrigin.call('/dsh-wechat/api/status', { headers: { host: '127.0.0.1:19387', origin: 'https://evil.example' } })
+    assert.equal(bad.statusCode, 403)
+    assert.equal(bad.body.includes('bot'), false, 'no bot state leaked to the caller')
+    // 4) an untrusted write is refused before it happens
+    const write = await crossOrigin.call('/dsh-wechat/api/add', { method: 'POST', headers: { host: '127.0.0.1:19387', origin: 'https://evil.example' } })
+    assert.equal(write.statusCode, 403)
+    // 5) the trusted caller still works, and nothing was queued by the refused write
+    const okStatus = await ok.call('/dsh-wechat/api/status')
+    assert.equal(okStatus.statusCode, 200)
+    assert.equal(JSON.parse(okStatus.body).adding, false)
+  } finally {
+    await noService.cleanup()
+    await throwing.cleanup()
+    await crossOrigin.cleanup()
+    await ok.cleanup()
   }
 })

@@ -141,6 +141,9 @@ test('adding a bot at runtime leaves the running bot polling', async () => {
   ctx.provide('sessions', { list: () => [], get: () => undefined })
   ctx.provide('tools', { register: () => () => {} })
   const routes = []
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', {
     port: 0,
     register(route) {
@@ -180,7 +183,7 @@ test('adding a bot at runtime leaves the running bot polling', async () => {
           resolve(this)
         },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   try {
@@ -235,6 +238,9 @@ test('re-scanning an already running bot replaces its channel and token', async 
   ctx.provide('sessions', { list: () => [], get: () => undefined })
   ctx.provide('tools', { register: () => () => {} })
   const routes = []
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', {
     port: 0,
     register(route) {
@@ -269,7 +275,7 @@ test('re-scanning an already running bot replaces its channel and token', async 
           resolve(this)
         },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   try {
@@ -317,6 +323,9 @@ test('a login nobody completes times out, says so, and frees the add button', as
   ctx.provide('sessions', { list: () => [], get: () => undefined })
   ctx.provide('tools', { register: () => () => {} })
   const routes = []
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
 
   const fiber = ctx.plugin(plugin, {
@@ -341,7 +350,7 @@ test('a login nobody completes times out, says so, and frees the add button', as
         writeHead(status, headers) { this.statusCode = status; this.headers = headers },
         end(body) { this.body = body ?? ''; resolve(this) },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   try {
@@ -397,6 +406,9 @@ test('while adding a bot the QR stays visible even though another bot is connect
   ctx.provide('sessions', { list: () => [], get: () => undefined })
   ctx.provide('tools', { register: () => () => {} })
   const routes = []
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
 
   const fiber = ctx.plugin(plugin, {
@@ -419,7 +431,7 @@ test('while adding a bot the QR stays visible even though another bot is connect
         writeHead(status, headers) { this.statusCode = status; this.headers = headers },
         end(body) { this.body = body ?? ''; resolve(this) },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   try {
@@ -481,6 +493,9 @@ test('a bot can be unbound from the settings API without touching the others', a
   ctx.provide('sessions', { list: () => [], get: () => undefined })
   ctx.provide('tools', { register: () => () => {} })
   const routes = []
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
 
   const fiber = ctx.plugin(plugin, {
@@ -502,7 +517,7 @@ test('a bot can be unbound from the settings API without touching the others', a
         writeHead(status, headers) { this.statusCode = status; this.headers = headers },
         end(body) { this.body = body ?? ''; resolve(this) },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   try {
@@ -563,6 +578,9 @@ test('the card can rename a bot, and the label reaches /api/status', async () =>
   ctx.provide('sessions', { list: () => [], get: () => undefined })
   ctx.provide('tools', { register: () => () => {} })
   const routes = []
+  // The private route asks the connection service to admit each request; tests admit by
+  // default and override it where the fence itself is under test.
+  ctx.provide('connection', { requestRejection: () => undefined })
   ctx.provide('webServer', { port: 0, register(route) { routes.push(route); return () => {} } })
 
   const fiber = ctx.plugin(plugin, {
@@ -585,7 +603,7 @@ test('the card can rename a bot, and the label reaches /api/status', async () =>
         writeHead(status, headers) { this.statusCode = status; this.headers = headers },
         end(body) { this.body = body ?? ''; resolve(this) },
       }
-      routes[0].handler({ url: target, method: options.method ?? 'GET' }, response)
+      routes[0].handler({ url: target, method: options.method ?? 'GET', headers: options.headers ?? { host: '127.0.0.1:19387', origin: 'http://127.0.0.1:19387' } }, response)
     })
 
   try {

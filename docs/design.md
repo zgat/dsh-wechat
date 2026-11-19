@@ -173,7 +173,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 - 组件只用 `react.createElement`（不引入 `@deepseek-ai` 运行时包，无构建步骤），每 4 秒轮询宿主接口渲染状态；
 - **二维码内联绘制**：`GET /dsh-wechat/api/qr` 返回 `{ version, svg }`（与终端渲染同一套矩阵），卡片把这段 SVG 直接插入 DOM —— 不依赖 `<img>` 加载、样式表或主题，这才算“直接显示在插件上”；`/api/qr.svg` 保留给浏览器直接访问；
 - 宿主侧在 GUI web server 的前缀路由里加了 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,rename,logout,errors}` 与错误日志页 `/dsh-wechat/errors`（**没有独立扫码页**，也不自开监听端口）：`status` 返回连接/阶段/`qrUrl`/版本/最近错误，`qr` 返回 `{version, svg}` 供卡片内联绘制，`refresh` 置 `qrState.restartRequested` 让登录流换一张码；
-- **边界**：这些接口不带令牌（回环地址信任），与同类微信插件一致；本地进程因此可以读到二维码——等于可以抢绑，已写进已知限制。旧版的一次性令牌随扫码页一起删除了。
+- **边界**：这些接口对外只暴露在宿主 GUI 端口上，并且**先过 `ctx.connection.requestRejection`**（Host/Origin 检查 + 浏览器认证）。未信任、跨站、缺服务或检查抛错一律在读取任何私有状态之前返回 403/503；受信请求（设置页卡片、GUI 内的图片加载）照常可用。旧版的一次性令牌随扫码页一起删除了。
 
 ## 错误日志
 

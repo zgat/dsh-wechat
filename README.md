@@ -112,7 +112,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 - **未绑定时直接显示二维码**（从 `/dsh-wechat/api/qr` 取 SVG 标记内联绘制），旁边有「刷新二维码」与「添加绑定」；
 - 最近错误（来自 `/status` 同一份状态）。
 
-实现方式与其它微信插件一致：`package.json` 里声明 `dsh.client`（`platform: 'web'`）+ `exports["./client"]`，浏览器 bundle 手写在 `lib/client.js`（只 `require("react")`，注册 `settings.section` slot），宿主侧在 GUI 的 web server 上提供 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,errors}` 与错误日志页 `/dsh-wechat/errors`。**没有独立扫码页**：这些路由只监听回环地址、不带令牌，与同类插件一致。
+实现方式与其它微信插件一致：`package.json` 里声明 `dsh.client`（`platform: 'web'`）+ `exports["./client"]`，浏览器 bundle 手写在 `lib/client.js`（只 `require("react")`，注册 `settings.section` slot），宿主侧在 GUI 的 web server 上提供 `/dsh-wechat/api/{status,qr,qr.svg,add,refresh,errors}` 与错误日志页 `/dsh-wechat/errors`。**没有独立扫码页**：`/dsh-wechat` 下所有路由先过 DSH 的 `connection.requestRejection` 信任栅栏（Host/Origin + 浏览器认证），未通过一律 403/503 且在任何私有状态读写之前返回；服务缺失或检查抛错时 **fail closed**。
 
 ## 微信里的命令
 
@@ -291,7 +291,7 @@ CLI 里 `dsh-wechat --status` 会逐只列出 bot、凭据来源、API 基座与
 - 发送边界：只发往当前会话/所有者/白名单；**状态目录内的文件（含凭据）拒绝发送**；
 - 日志与工具进度行脱敏：`Bearer …`、`sk-…`/`github_pat_…`/`AKIA…`/`AIza…`、JWT、PEM 私钥块、`token=…` 与中文字段名（`密码`/`令牌`…）；
 - 网络：所有请求禁止跟随重定向；登录返回的 API 基座与 CDN 地址强校验（公网强制 https）；
-- 卡片接口只监听宿主 GUI 的回环端口，不带令牌（与同类插件一致）；二维码只在设置页卡片与终端出现。
+- 卡片接口只挂在宿主 GUI 端口上，且每个请求先过 `connection.requestRejection`（Host/Origin + 浏览器认证）；未信任的调用方读到的是 403，二维码只在设置页卡片与终端出现。
 
 完整清单见 [docs/side-effects.md](docs/side-effects.md)。
 
