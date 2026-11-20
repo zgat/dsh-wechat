@@ -1298,7 +1298,9 @@ test('answering 0 only acknowledges: the conversation is untouched', async () =>
 test('answering N echoes the last N exchanges back to WeChat', async () => {
   const events = []
   for (let index = 1; index <= 4; index += 1) {
-    events.push({ type: 'user/message', data: { message: { content: `旧问题${index}` } } })
+    events.push({ type: 'user/message', data: { content: [{ type: 'text', text: `旧问题${index}` }], source: { kind: 'user' }, role: 'user' } })
+    // Injected context shares the event type; it must never reach the recap.
+    events.push({ type: 'user/message', data: { content: [{ type: 'text', text: `<system-reminder>内部提示${index}</system-reminder>` }], source: { kind: 'skill-catalog' }, role: 'user' } })
     events.push({ type: 'assistant/message', data: { message: { content: `旧回答${index}` } } })
   }
   const env = await setup({
@@ -1325,10 +1327,11 @@ test('answering N echoes the last N exchanges back to WeChat', async () => {
     // Markdown: a heading, bold role labels and blockquoted text, so it can be skimmed.
     assert.match(recap.text, /^### 「重构桥接」回执 1\/1（第 1–2 段）/)
     assert.match(recap.text, /\*\*用户\*\*\n> 旧问题3/)
-    assert.match(recap.text, /\*\*助手\*\*\n> 旧回答3/)
+    assert.match(recap.text, /\*\*DSH\*\*\n> 旧回答3/)
     assert.match(recap.text, /\*\*用户\*\*\n> 旧问题4/)
     assert.ok(recap.text.includes('\n---\n'), 'segments are separated by a rule')
     assert.ok(!recap.text.includes('旧问题1'), 'older exchanges stay out')
+    assert.ok(!recap.text.includes('system-reminder'), 'injected context never reaches the recap')
     // The session is still the target one, and no background is injected into the model.
     assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-history')
     await env.bridge.handleInbound(inboundMessage({ text: '接着刚才说', id: 3 }))
@@ -3378,7 +3381,7 @@ test('/workspace survives a session id the host no longer knows', async () => {
 test('a receipt is split into three-segment markdown messages', async () => {
   const events = []
   for (let index = 1; index <= 7; index += 1) {
-    events.push({ type: 'user/message', data: { message: { content: `问题${index}` } } })
+    events.push({ type: 'user/message', data: { content: [{ type: 'text', text: `问题${index}` }], source: { kind: 'user' }, role: 'user' } })
     events.push({ type: 'assistant/message', data: { message: { content: `回答${index}` } } })
   }
   const env = await setup({
@@ -3406,9 +3409,40 @@ test('a receipt is split into three-segment markdown messages', async () => {
     assert.match(recaps[2].text, /回执 3\/3（第 7–7 段）/)
     assert.ok(recaps[0].text.includes('> 问题1') && recaps[0].text.includes('> 回答3'))
     assert.equal(recaps[0].text.includes('问题4'), false, 'batches do not overlap')
-    for (const entry of recaps) {
-      assert.ok(entry.text.length <= 1800, `a receipt message must fit one chunk, got ${entry.text.length}`)
-    }
+    assert.ok(recaps[0].text.includes('> 问题1') && recaps[0].text.includes('> 回答3'), 'the whole batch is present')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a recap keeps long text intact instead of trailing ellipses', async () => {
+  const longUser = 'U'.repeat(600)
+  const longAnswer = 'A'.repeat(900)
+  const events = [
+    { type: 'user/message', data: { content: [{ type: 'text', text: longUser }], source: { kind: 'user' }, role: 'user' } },
+    { type: 'assistant/message', data: { message: { content: longAnswer } } },
+  ]
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-long', cwd: '/tmp', createdAt: 1 } }],
+          readTitle: async () => ({ title: '长文本' }),
+          readSession: async () => ({ events }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-long' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    await env.bridge.handleInbound(inboundMessage({ text: '1', id: 2 }))
+    const recap = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /^### 「长文本」回执/.test(t)))
+    assert.ok(recap.includes(longUser), 'the full question survives')
+    assert.ok(recap.includes(longAnswer), 'the full answer survives')
+    assert.equal(recap.includes('…'), false, 'no truncation marker')
+    assert.match(recap, /\*\*DSH\*\*/)
   } finally {
     await env.cleanup()
   }
