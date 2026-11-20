@@ -1320,12 +1320,14 @@ test('answering N echoes the last N exchanges back to WeChat', async () => {
     const before = env.client.sent.length
     await env.bridge.handleInbound(inboundMessage({ text: '2', id: 2 }))
     await waitFor(() => env.client.sent.length >= before + 2)
-    const recap = env.client.sent.find((entry) => /段回执/.test(entry.text))
+    const recap = env.client.sent.find((entry) => /^### 「重构桥接」回执/.test(entry.text))
     assert.ok(recap, 'the recap must be delivered to the chat')
-    assert.match(recap.text, /重构桥接/)
-    assert.match(recap.text, /用户：旧问题3/)
-    assert.match(recap.text, /助手：旧回答3/)
-    assert.match(recap.text, /用户：旧问题4/)
+    // Markdown: a heading, bold role labels and blockquoted text, so it can be skimmed.
+    assert.match(recap.text, /^### 「重构桥接」回执 1\/1（第 1–2 段）/)
+    assert.match(recap.text, /\*\*用户\*\*\n> 旧问题3/)
+    assert.match(recap.text, /\*\*助手\*\*\n> 旧回答3/)
+    assert.match(recap.text, /\*\*用户\*\*\n> 旧问题4/)
+    assert.ok(recap.text.includes('\n---\n'), 'segments are separated by a rule')
     assert.ok(!recap.text.includes('旧问题1'), 'older exchanges stay out')
     // The session is still the target one, and no background is injected into the model.
     assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-history')
@@ -3369,6 +3371,44 @@ test('/workspace survives a session id the host no longer knows', async () => {
     await env.bridge.handleInbound(inboundMessage({ text: '/workspace', id: 11 }))
     const listing = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /项目目录/.test(t)))
     assert.match(listing, /项目目录/)
+  } finally {
+    await env.cleanup()
+  }
+})
+test('a receipt is split into three-segment markdown messages', async () => {
+  const events = []
+  for (let index = 1; index <= 7; index += 1) {
+    events.push({ type: 'user/message', data: { message: { content: `问题${index}` } } })
+    events.push({ type: 'assistant/message', data: { message: { content: `回答${index}` } } })
+  }
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-many', cwd: '/tmp', createdAt: 1 } }],
+          readTitle: async () => ({ title: '七段对话' }),
+          readSession: async () => ({ events }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-many' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    const before = env.client.sent.length
+    await env.bridge.handleInbound(inboundMessage({ text: '7', id: 2 }))
+    await waitFor(() => env.client.sent.length >= before + 4)
+    const recaps = env.client.sent.filter((entry) => /^### 「七段对话」回执/.test(entry.text))
+    assert.equal(recaps.length, 3, '7 segments become 3 messages (3 / 3 / 1)')
+    assert.match(recaps[0].text, /回执 1\/3（第 1–3 段）/)
+    assert.match(recaps[1].text, /回执 2\/3（第 4–6 段）/)
+    assert.match(recaps[2].text, /回执 3\/3（第 7–7 段）/)
+    assert.ok(recaps[0].text.includes('> 问题1') && recaps[0].text.includes('> 回答3'))
+    assert.equal(recaps[0].text.includes('问题4'), false, 'batches do not overlap')
+    for (const entry of recaps) {
+      assert.ok(entry.text.length <= 1800, `a receipt message must fit one chunk, got ${entry.text.length}`)
+    }
   } finally {
     await env.cleanup()
   }

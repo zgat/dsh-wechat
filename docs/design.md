@@ -209,6 +209,15 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 绑定表里可能留着**宿主已经不认识的 session id**（DSH 升级或重启后）。旧代码把 `sessions.get(id)`（此时是 `undefined`）直接传给 `current()`，DSH 内部 `stateOf(undefined)` 抛 `Cannot read properties of undefined (reading 'header')`，于是 `/workspace`、`/status` 整条命令失败。现在两个查询都走 `#safeLookup()`：拿不到会话就返回 `null`，服务抛错也只降级为未知，并在 debug 日志里留 4 行栈；命令错误回执也会附上第一帧 `<at …>` 便于定位。
 
+## 回执（/session 切换后的最近 N 段）
+
+`applyContextChoice()` 把目标会话最近 N 段（一段 = 一问一答）回执到微信：
+
+- `#contextSegments()` 倒序扫描事件，**先缓冲助手消息**再与它前面的用户消息配对（事件顺序是 U→A，倒序时 A 先到），每段用户文本截 140 字、助手文本截 280 字；
+- `#renderReceipt()` 输出 Markdown：`### 「标题」回执 1/3（第 1–3 段）` + `**用户**`/`**助手**` + 引用块，段与段之间一条 `---`；
+- 每 `RECEIPT_SEGMENTS_PER_MESSAGE`（3）段发一条消息，依次 `await deliver()`，所以批次有序且一条失败即停（不会中间缺一段）；
+- 3 段 ×（140+280）字 + 分隔符控制在单条 1800 字符以内，避免被 `chunkChars` 再切一次。
+
 ## 渲染
 
 - **表格**（`renderTable()`）：`/status` 输出 **Markdown 表格**——微信会渲染它，所以不需要自己画框线，也**不需要按中文双宽补空格**（对齐由渲染器负责）。单元格里的 `|` 转义成 `\|`、换行折成空格，避免破坏表格结构；放不进单元格的长内容（最近错误原文）写在表格下方。
