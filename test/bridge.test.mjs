@@ -1255,7 +1255,7 @@ test('/session lists titles, then asks how many segments to echo back', async ()
     assert.match(selected, /已切换到对话：整理测试/)
     assert.ok(!/已切换到对话：session-alpha/.test(selected), 'the label must be the title, not the id')
     assert.match(selected, /0-10/)
-    assert.match(selected, /ClawBot 的单条消息上限/)
+    assert.equal(selected.includes('ClawBot'), false, 'no message-limit note is shown any more')
     assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-alpha')
     assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat')?.sessionId, 'session-alpha')
     // The old agent is released so the next message opens the new conversation.
@@ -1323,10 +1323,10 @@ test('answering N echoes the last N exchanges back to WeChat', async () => {
     const before = env.client.sent.length
     await env.bridge.handleInbound(inboundMessage({ text: '2', id: 2 }))
     await waitFor(() => env.client.sent.length >= before + 2)
-    const recap = env.client.sent.find((entry) => /^### 「重构桥接」回执/.test(entry.text))
+    const recap = env.client.sent.find((entry) => /^### 「重构桥接」最近 2 段回执/.test(entry.text))
     assert.ok(recap, 'the recap must be delivered to the chat')
     // Markdown: a heading, bold role labels and blockquoted text, so it can be skimmed.
-    assert.match(recap.text, /^### 「重构桥接」回执 1\/1（第 1–2 段）/)
+    assert.match(recap.text, /^### 「重构桥接」最近 2 段回执/)
     assert.match(recap.text, /\*\*用户\*\*\n> 旧问题3/)
     assert.match(recap.text, /\*\*DSH\*\*\n> 旧回答3/)
     assert.match(recap.text, /\*\*用户\*\*\n> 旧问题4/)
@@ -3379,7 +3379,7 @@ test('/workspace survives a session id the host no longer knows', async () => {
     await env.cleanup()
   }
 })
-test('a receipt is split into three-segment markdown messages', async () => {
+test('a receipt is a single markdown message', async () => {
   const events = []
   for (let index = 1; index <= 7; index += 1) {
     events.push({ type: 'user/message', data: { content: [{ type: 'text', text: `问题${index}` }], source: { kind: 'user' }, role: 'user' } })
@@ -3402,15 +3402,9 @@ test('a receipt is split into three-segment markdown messages', async () => {
     await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
     const before = env.client.sent.length
     await env.bridge.handleInbound(inboundMessage({ text: '7', id: 2 }))
-    await waitFor(() => env.client.sent.length >= before + 4)
-    const recaps = env.client.sent.filter((entry) => /^### 「七段对话」回执/.test(entry.text))
-    assert.equal(recaps.length, 3, '7 segments become 3 messages (3 / 3 / 1)')
-    assert.match(recaps[0].text, /回执 1\/3（第 1–3 段）/)
-    assert.match(recaps[1].text, /回执 2\/3（第 4–6 段）/)
-    assert.match(recaps[2].text, /回执 3\/3（第 7–7 段）/)
-    assert.ok(recaps[0].text.includes('> 问题1') && recaps[0].text.includes('> 回答3'))
-    assert.equal(recaps[0].text.includes('问题4'), false, 'batches do not overlap')
-    assert.ok(recaps[0].text.includes('> 问题1') && recaps[0].text.includes('> 回答3'), 'the whole batch is present')
+    const recap = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /^### 「七段对话」最近 7 段回执/.test(t)))
+    assert.ok(recap.includes('> 问题1') && recap.includes('> 回答7'), 'all seven exchanges are present')
+    assert.equal(recap.split('**用户**').length - 1, 7, 'seven user blocks in one message')
   } finally {
     await env.cleanup()
   }
@@ -3450,7 +3444,7 @@ test('a recap keeps long text intact instead of trailing ellipses', async () => 
     await env.bridge.handleInbound(inboundMessage({ text: '/session session-long' }))
     await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
     await env.bridge.handleInbound(inboundMessage({ text: '1', id: 2 }))
-    const recap = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /^### 「长文本」回执/.test(t)))
+    const recap = await waitFor(() => env.client.sent.map((e) => e.text).find((t) => /^### 「长文本」最近 1 段回执/.test(t)))
     assert.ok(recap.includes(longUser), 'the full question survives')
     assert.ok(recap.includes(longAnswer), 'the full answer survives')
     assert.equal(recap.includes('…'), false, 'no truncation marker')
@@ -3495,7 +3489,7 @@ test('a recap depth above ten is refused with the allowed range', async () => {
   }
 })
 
-test('ten segments are accepted and split into four messages', async () => {
+test('ten segments are accepted as one message', async () => {
   const events = []
   for (let index = 1; index <= 12; index += 1) {
     events.push({ type: 'user/message', data: { content: [{ type: 'text', text: `问${index}` }], source: { kind: 'user' }, role: 'user' } })
@@ -3518,14 +3512,11 @@ test('ten segments are accepted and split into four messages', async () => {
     await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
     const before = env.client.sent.length
     await env.bridge.handleInbound(inboundMessage({ text: '10', id: 2 }))
-    await waitFor(() => env.client.sent.slice(before).filter((e) => /^### 「十段对话」回执/.test(e.text)).length === 4)
-    const recaps = env.client.sent.slice(before).filter((e) => /^### 「十段对话」回执/.test(e.text))
-    assert.equal(recaps.length, 4, '10 segments -> 3 / 3 / 3 / 1')
-    assert.match(recaps[3].text, /回执 4\/4（第 10–10 段）/)
-    // Ten of twelve exchanges means the newest ten: 问3…问12.
-    assert.ok(recaps[0].text.includes('> 问3') && recaps[0].text.includes('> 问5'))
-    assert.equal(recaps[0].text.includes('问6'), false, 'the batch stops at three segments')
-    assert.equal(recaps[0].text.includes('问2'), false, 'older exchanges stay out')
+    const recap = await waitFor(() => env.client.sent.slice(before).map((e) => e.text).find((t) => /^### 「十段对话」最近 10 段回执/.test(t)))
+    // Ten of twelve exchanges means the newest ten: 问3…问12, in one message.
+    assert.ok(recap.includes('> 问3') && recap.includes('> 问12'))
+    assert.equal(recap.includes('问2'), false, 'older exchanges stay out')
+    assert.equal(recap.split('**用户**').length - 1, 10, 'ten user blocks')
   } finally {
     await env.cleanup()
   }
