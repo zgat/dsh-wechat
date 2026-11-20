@@ -1254,7 +1254,8 @@ test('/session lists titles, then asks how many segments to echo back', async ()
     // The conversation is bound right away — it is still that conversation.
     assert.match(selected, /已切换到对话：整理测试/)
     assert.ok(!/已切换到对话：session-alpha/.test(selected), 'the label must be the title, not the id')
-    assert.match(selected, /0-99/)
+    assert.match(selected, /0-10/)
+    assert.match(selected, /ClawBot 的单条消息上限/)
     assert.equal(env.store.sessionFor('p2p:user@im.wechat'), 'session-alpha')
     assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat')?.sessionId, 'session-alpha')
     // The old agent is released so the next message opens the new conversation.
@@ -3456,6 +3457,75 @@ test('a recap keeps long text intact instead of trailing ellipses', async () => 
     assert.match(recap, /\*\*DSH\*\*/)
     assert.equal(recap.includes('这是思考过程'), false, 'the thinking process stays out of the recap')
     assert.equal(recap.includes('tool-call'), false, 'tool calls stay out too')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('a recap depth above ten is refused with the allowed range', async () => {
+  const events = []
+  for (let index = 1; index <= 3; index += 1) {
+    events.push({ type: 'user/message', data: { content: [{ type: 'text', text: `问题${index}` }], source: { kind: 'user' }, role: 'user' } })
+    events.push({ type: 'assistant/message', data: { message: { content: `回答${index}` } } })
+  }
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-cap', cwd: '/tmp', createdAt: 1 } }],
+          readTitle: async () => ({ title: '上限对话' }),
+          readSession: async () => ({ events }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-cap' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    const before = env.client.sent.length
+    await env.bridge.handleInbound(inboundMessage({ text: '11', id: 2 }))
+    const reply = await waitFor(() => env.client.sent.slice(before).map((e) => e.text).find((t) => /回执段数只能/.test(t)))
+    assert.match(reply, /回执段数只能 0-10/)
+    assert.equal(env.store.pendingSwitchFor('p2p:user@im.wechat'), null, 'the question is closed')
+    assert.equal(env.harness.agents.length, 0, 'the out-of-range number is not sent as a turn')
+    assert.equal(env.client.sent.slice(before).some((e) => /^### /.test(e.text)), false, 'no recap is sent')
+  } finally {
+    await env.cleanup()
+  }
+})
+
+test('ten segments are accepted and split into four messages', async () => {
+  const events = []
+  for (let index = 1; index <= 12; index += 1) {
+    events.push({ type: 'user/message', data: { content: [{ type: 'text', text: `问${index}` }], source: { kind: 'user' }, role: 'user' } })
+    events.push({ type: 'assistant/message', data: { message: { content: `答${index}` } } })
+  }
+  const env = await setup({
+    harness: {
+      services: {
+        workspaceRegistry: { list: () => [{ path: '/tmp' }] },
+        sessionQuery: {
+          listSessions: async () => [{ header: { id: 'session-ten', cwd: '/tmp', createdAt: 1 } }],
+          readTitle: async () => ({ title: '十段对话' }),
+          readSession: async () => ({ events }),
+        },
+      },
+    },
+  })
+  try {
+    await env.bridge.handleInbound(inboundMessage({ text: '/session session-ten' }))
+    await waitFor(() => env.store.pendingSwitchFor('p2p:user@im.wechat') !== null)
+    const before = env.client.sent.length
+    await env.bridge.handleInbound(inboundMessage({ text: '10', id: 2 }))
+    await waitFor(() => env.client.sent.slice(before).filter((e) => /^### 「十段对话」回执/.test(e.text)).length === 4)
+    const recaps = env.client.sent.slice(before).filter((e) => /^### 「十段对话」回执/.test(e.text))
+    assert.equal(recaps.length, 4, '10 segments -> 3 / 3 / 3 / 1')
+    assert.match(recaps[3].text, /回执 4\/4（第 10–10 段）/)
+    // Ten of twelve exchanges means the newest ten: 问3…问12.
+    assert.ok(recaps[0].text.includes('> 问3') && recaps[0].text.includes('> 问5'))
+    assert.equal(recaps[0].text.includes('问6'), false, 'the batch stops at three segments')
+    assert.equal(recaps[0].text.includes('问2'), false, 'older exchanges stay out')
   } finally {
     await env.cleanup()
   }
