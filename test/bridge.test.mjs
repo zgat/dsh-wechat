@@ -3420,7 +3420,18 @@ test('a recap keeps long text intact instead of trailing ellipses', async () => 
   const longAnswer = 'A'.repeat(900)
   const events = [
     { type: 'user/message', data: { content: [{ type: 'text', text: longUser }], source: { kind: 'user' }, role: 'user' } },
-    { type: 'assistant/message', data: { message: { content: longAnswer } } },
+    {
+      type: 'assistant/message',
+      data: {
+        message: {
+          content: [
+            { type: 'reasoning', text: '这是思考过程，不该出现在回执里' },
+            { type: 'tool-call', name: 'bash', arguments: '{"command":"ls"}' },
+            { type: 'text', text: longAnswer },
+          ],
+        },
+      },
+    },
   ]
   const env = await setup({
     harness: {
@@ -3443,6 +3454,8 @@ test('a recap keeps long text intact instead of trailing ellipses', async () => 
     assert.ok(recap.includes(longAnswer), 'the full answer survives')
     assert.equal(recap.includes('…'), false, 'no truncation marker')
     assert.match(recap, /\*\*DSH\*\*/)
+    assert.equal(recap.includes('这是思考过程'), false, 'the thinking process stays out of the recap')
+    assert.equal(recap.includes('tool-call'), false, 'tool calls stay out too')
   } finally {
     await env.cleanup()
   }

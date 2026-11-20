@@ -215,6 +215,7 @@ DSH Agent 循环（会话日志、工具、审批、模型路由都由 DSH 负�
 
 - `#contextSegments()` 倒序扫描事件，**先缓冲助手消息**再与它前面的用户消息配对（事件顺序是 U→A，倒序时 A 先到）；文本**整段保留**，不做省略号截断；
 - 只收 `source.kind === 'user'` 的消息：同一事件类型下，注入上下文（`runtime-context`、`skill-catalog`、`agent-instructions`、`time-context`、`schedule`、`goal` 等）都有自己的 kind，一律排除；没有 `source` 的旧日志视为真人消息；
+- 只取内容里 `type === 'text'` 的部分：助手消息还有 `reasoning`（思考过程）与 `tool-call` 部分，早先按"所有 part.text 拼接"会把推理过程写进回执；现在多段文本用空行连接；
 - `#renderReceipt()` 输出 Markdown：`### 「标题」回执 1/3（第 1–3 段）` + `**用户**`/`**DSH**` + 引用块，段与段之间一条 `---`；
 - 每 `RECEIPT_SEGMENTS_PER_MESSAGE`（3）段发一条消息，依次 `await deliver()`，所以批次有序且一条失败即停（不会中间缺一段）；
 - 3 段 ×（140+280）字 + 分隔符控制在单条 1800 字符以内，避免被 `chunkChars` 再切一次。
