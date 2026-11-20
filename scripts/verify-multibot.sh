@@ -114,7 +114,20 @@ for port in $ports; do
   esac
 done
 if [ -z "$found" ]; then
-  say "  （没找到运行中的 GUI 端口，或插件未加载）"
+  # After AUTH001 every private route refuses an unauthenticated caller, so a 401/403/503 is the
+  # expected answer and proves the route is mounted. Only a 404 would mean it is missing.
+  fenced=""
+  for port in $ports; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$port/dsh-wechat/api/status" 2>/dev/null || true)"
+    case "$code" in
+      401|403|503) fenced="$port:$code"; break ;;
+    esac
+  done
+  if [ -n "$fenced" ]; then
+    say "  ✅ 路由已挂载并拒绝未认证请求（${fenced}）——AUTH001 信任栅栏生效；认证后由设置页卡片访问"
+  else
+    say "  （没找到运行中的 GUI 端口，或插件未加载）"
+  fi
 else
   say "  $found" | head -c 600
   say ""
